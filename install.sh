@@ -1,9 +1,9 @@
 #!/bin/sh
-# NoshMem one-liner installer
-# curl -fsSL https://raw.githubusercontent.com/noshkoto/NoshMem/main/install.sh | sh
+# Noshy one-liner installer
+# curl -fsSL https://raw.githubusercontent.com/noshkoto/Noshy/main/install.sh | sh
 set -e
 
-echo "Installing NoshMem — persistent memory for AI agents..."
+echo "Installing Noshy — persistent memory for AI agents..."
 echo ""
 
 # Check Python
@@ -18,10 +18,10 @@ if [ -d "$AI_DIR/src" ]; then
     echo "Updating existing install..."
     cd "$AI_DIR/src" && git pull 2>/dev/null || true
 else
-    echo "Downloading NoshMem..."
-    git clone --depth 1 https://github.com/noshkoto/NoshMem.git "$AI_DIR/src" 2>/dev/null || {
+    echo "Downloading Noshy..."
+    git clone --depth 1 https://github.com/noshkoto/Noshy.git "$AI_DIR/src" 2>/dev/null || {
         echo "Git not available. Downloading tarball..."
-        curl -fsSL https://github.com/noshkoto/NoshMem/archive/refs/heads/main.tar.gz | tar xz -C /tmp/
+        curl -fsSL https://github.com/noshkoto/Noshy/archive/refs/heads/main.tar.gz | tar xz -C /tmp/
         mv /tmp/aion-main "$AI_DIR/src"
     }
 fi
@@ -38,7 +38,7 @@ if [ "$answer" != "n" ] && [ "$answer" != "N" ]; then
 fi
 
 echo ""
-echo "=== NoshMem installed ==="
+echo "=== Noshy installed ==="
 echo ""
 echo "Start with:"
 echo "  python3 $AI_DIR/src/server.py http"
@@ -46,5 +46,5 @@ echo ""
 echo "Or as MCP server:"
 echo "  python3 $AI_DIR/src/server.py mcp"
 echo ""
-echo "Set NOSHMEM_EMBED_PROVIDER=openai for OpenAI embeddings"
-echo "Set NOSHMEM_EMBED_PROVIDER=fastembed for local embeddings"
+echo "Set NOSHY_EMBED_PROVIDER=openai for OpenAI embeddings"
+echo "Set NOSHY_EMBED_PROVIDER=fastembed for local embeddings"

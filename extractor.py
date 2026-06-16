@@ -1,5 +1,5 @@
 """
-NoshMem extractor — LLM-powered fact extraction from conversation transcripts.
+Noshy extractor — LLM-powered fact extraction from conversation transcripts.
 Uses the Hermes agent (or any OpenAI-compatible API) to extract structured
 memories, keywords, and relationships from raw text.
 """
@@ -193,11 +193,11 @@ def _call_llm(prompt: str, *, api_base: str = None, api_key: str = None, model: 
     import urllib.request, urllib.error
 
     if api_base is None:
-        api_base = os.environ.get("NOSHMEM_API_BASE", "http://127.0.0.1:8642/v1")
+        api_base = os.environ.get("NOSHY_API_BASE", "http://127.0.0.1:8642/v1")
     if api_key is None:
-        api_key = os.environ.get("NOSHMEM_API_KEY", os.environ.get("API_SERVER_KEY", ""))
+        api_key = os.environ.get("NOSHY_API_KEY", os.environ.get("API_SERVER_KEY", ""))
     if model is None:
-        model = os.environ.get("NOSHMEM_MODEL", "hermes-agent")
+        model = os.environ.get("NOSHY_MODEL", "hermes-agent")
 
     body = json.dumps({
         "model": model,

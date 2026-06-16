@@ -1,5 +1,5 @@
 """
-NoshMem MCP server — exposes memory operations via MCP protocol and HTTP API.
+Noshy MCP server — exposes memory operations via MCP protocol and HTTP API.
 Compatible with Hermes Agent, Claude Code, and any MCP client.
 """
 import os
@@ -14,7 +14,7 @@ from typing import Optional, List, Dict, Any
 # Add parent to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from store import NoshMemStore
+from store import NoshyStore
 from extractor import extract_facts, consolidate_memories
 from embed import auto_embedder
 from context import session_context, decision_timeline, detect_patterns, extract_preferences
@@ -26,7 +26,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("aion.server")
 
-store: NoshMemStore = None
+store: NoshyStore = None
 
 
 # ──────────── MCP Protocol Handlers ────────────
@@ -149,7 +149,7 @@ def handle_initialize(params: Dict) -> Dict:
     return {
         "protocolVersion": "2024-11-05",
         "capabilities": {"tools": {}},
-        "serverInfo": {"name": "nosh-mem", "version": "0.1.0"},
+        "serverInfo": {"name": "noshy", "version": "0.1.0"},
     }
 
 
@@ -281,11 +281,11 @@ def handle_tools_call(params: Dict) -> Dict:
 # ──────────── MCP stdio mode ────────────
 
 def run_stdio(db_path: str = None):
-    """Run NoshMem as an MCP stdio server."""
+    """Run Noshy as an MCP stdio server."""
     global store
     embedder = auto_embedder()
-    store = NoshMemStore(db_path=db_path, embedder=embedder)
-    log.info(f"NoshMem MCP stdio server ready (embed: {type(embedder).__name__})")
+    store = NoshyStore(db_path=db_path, embedder=embedder)
+    log.info(f"Noshy MCP stdio server ready (embed: {type(embedder).__name__})")
 
     import sys
     for line in sys.stdin:
@@ -330,10 +330,10 @@ def run_stdio(db_path: str = None):
 # ──────────── HTTP API mode ────────────
 
 def run_http(host: str = "127.0.0.1", port: int = 8720, db_path: str = None):
-    """Run NoshMem as an HTTP API server."""
+    """Run Noshy as an HTTP API server."""
     global store
     embedder = auto_embedder()
-    store = NoshMemStore(db_path=db_path, embedder=embedder)
+    store = NoshyStore(db_path=db_path, embedder=embedder)
 
     from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -380,14 +380,14 @@ def run_http(host: str = "127.0.0.1", port: int = 8720, db_path: str = None):
             log.info(f"HTTP {args[0]} {args[1]} {args[2]}")
 
     server = HTTPServer((host, port), Handler)
-    log.info(f"NoshMem HTTP API running on http://{host}:{port}")
+    log.info(f"Noshy HTTP API running on http://{host}:{port}")
     server.serve_forever()
 
 
 # ──────────── CLI ────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="NoshMem — MCP-native memory for AI agents")
+    parser = argparse.ArgumentParser(description="Noshy — MCP-native memory for AI agents")
     parser.add_argument("--db", help="Database path", default=None)
     sub = parser.add_subparsers(dest="command")
 
@@ -425,7 +425,7 @@ def main():
 
     global store
     db = getattr(args, 'db', None)
-    store = NoshMemStore(db_path=db)
+    store = NoshyStore(db_path=db)
 
     if args.command == "mcp":
         run_stdio(db_path=db)

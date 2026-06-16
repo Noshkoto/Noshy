@@ -1,11 +1,11 @@
-# NoshMem — Persistent Memory for AI Agents
+# Noshy — Persistent Memory for AI Agents
 
 **ICM-compatible. MCP-native. Works with any LLM.**
 
-NoshMem gives your AI agent real memory — not note-taking, not context stuffing, not a vector database you have to manage. Store facts, search across sessions, build knowledge graphs. It's what ICM wanted to be, re-built to work everywhere.
+Noshy gives your AI agent real memory — not note-taking, not context stuffing, not a vector database you have to manage. Store facts, search across sessions, build knowledge graphs. It's what ICM wanted to be, re-built to work everywhere.
 
 ```
-                     NoshMem
+                     Noshy
           ┌───────────┼───────────┐
           │   MEMORIES            │   MEMOIRS
           │   (time-bound)        │   (permanent)
@@ -28,7 +28,7 @@ NoshMem gives your AI agent real memory — not note-taking, not context stuffin
           └────────────────────┘
 ```
 
-## Why NoshMem
+## Why Noshy
 
 - **LLM-powered extraction** — not regex. Uses any OpenAI-compatible API to extract structured facts from transcripts
 - **Hybrid search** — keyword + semantic + graph recall in one query
@@ -42,13 +42,13 @@ NoshMem gives your AI agent real memory — not note-taking, not context stuffin
 
 ```bash
 # Install
-curl -fsSL https://raw.githubusercontent.com/noshkoto/NoshMem/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/noshkoto/Noshy/main/install.sh | sh
 
 # Start HTTP server
-cd ~/.nosh-mem/src && python3 server.py http
+cd ~/.noshy/src && python3 server.py http
 
 # Or MCP stdio mode
-cd ~/.nosh-mem/src && python3 server.py mcp
+cd ~/.noshy/src && python3 server.py mcp
 ```
 
 ## Usage
@@ -77,11 +77,11 @@ Add to your MCP client config:
 ```json
 {
   "mcpServers": {
-    "nosh-mem": {
+    "noshy": {
       "command": "python3",
-      "args": ["/path/to/nosh-mem/server.py", "mcp"],
+      "args": ["/path/to/noshy/server.py", "mcp"],
       "env": {
-        "NOSHMEM_EMBED_PROVIDER": "openai",
+        "NOSHY_EMBED_PROVIDER": "openai",
         "OPENAI_API_KEY": "sk-..."
       }
     }
@@ -94,9 +94,9 @@ Add to your MCP client config:
 mcp_servers:
   aion:
     command: "python3"
-    args: ["/path/to/nosh-mem/server.py", "mcp"]
+    args: ["/path/to/noshy/server.py", "mcp"]
     env:
-      NOSHMEM_EMBED_PROVIDER: "openai"
+      NOSHY_EMBED_PROVIDER: "openai"
       OPENAI_API_KEY: "sk-..."
 ```
 
@@ -104,9 +104,9 @@ mcp_servers:
 ```json
 {
   "mcpServers": {
-    "nosh-mem": {
+    "noshy": {
       "command": "python3",
-      "args": ["/path/to/nosh-mem/server.py", "mcp"]
+      "args": ["/path/to/noshy/server.py", "mcp"]
     }
   }
 }
@@ -142,12 +142,12 @@ curl http://127.0.0.1:8720/stats
 
 ## Embedding Providers
 
-NoshMem auto-detects the best available embedding provider. Set `NOSHMEM_EMBED_PROVIDER` to override:
+Noshy auto-detects the best available embedding provider. Set `NOSHY_EMBED_PROVIDER` to override:
 
 | Provider | Env Var | API Key | Quality |
 |----------|---------|---------|---------|
-| OpenAI | `NOSHMEM_EMBED_PROVIDER=openai` | `OPENAI_API_KEY` | Best |
-| fastembed | `NOSHMEM_EMBED_PROVIDER=fastembed` | None (local) | Good |
+| OpenAI | `NOSHY_EMBED_PROVIDER=openai` | `OPENAI_API_KEY` | Best |
+| fastembed | `NOSHY_EMBED_PROVIDER=fastembed` | None (local) | Good |
 | Hermes API | auto-detected | `API_SERVER_KEY` | Varies |
 | None | No embedding | None | Keyword only |
 
@@ -161,7 +161,7 @@ pip install fastembed
 python3 server.py http
 
 # Keyword-only (no embeddings)
-NOSHMEM_EMBED_PROVIDER=none python3 server.py http
+NOSHY_EMBED_PROVIDER=none python3 server.py http
 ```
 
 ## Platform Setup
@@ -171,8 +171,8 @@ NOSHMEM_EMBED_PROVIDER=none python3 server.py http
 # Install Python 3.10+ if needed
 brew install python@3.12
 
-# Install NoshMem
-curl -fsSL https://raw.githubusercontent.com/noshkoto/NoshMem/main/install.sh | sh
+# Install Noshy
+curl -fsSL https://raw.githubusercontent.com/noshkoto/Noshy/main/install.sh | sh
 
 # Optional: local embeddings
 pip3 install fastembed
@@ -183,15 +183,15 @@ pip3 install fastembed
 sudo apt install python3   # Debian/Ubuntu
 sudo dnf install python3    # Fedora
 
-curl -fsSL https://raw.githubusercontent.com/noshkoto/NoshMem/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/noshkoto/Noshy/main/install.sh | sh
 ```
 
 ### Windows
 ```powershell
 # Install Python from python.org (check "Add to PATH")
 
-# Download NoshMem
-Invoke-WebRequest -Uri https://github.com/noshkoto/NoshMem/archive/refs/heads/main.zip -OutFile aion.zip
+# Download Noshy
+Invoke-WebRequest -Uri https://github.com/noshkoto/Noshy/archive/refs/heads/main.zip -OutFile aion.zip
 Expand-Archive aion.zip -DestinationPath $env:USERPROFILE\.aion
 Rename-Item $env:USERPROFILE\.aion\aion-main $env:USERPROFILE\.aion\src
 
@@ -205,27 +205,27 @@ docker run -d --name aion \
   -p 8720:8720 \
   -v aion-data:/root/.aion \
   -e OPENAI_API_KEY=sk-... \
-  ghcr.io/noshkoto/NoshMem:latest
+  ghcr.io/noshkoto/Noshy:latest
 ```
 
 ## Configuration
 
 | Env Variable | Default | Description |
 |-------------|---------|-------------|
-| `NOSHMEM_DB` | `~/.nosh-mem/memories.db` | Database path |
-| `NOSHMEM_EMBED_PROVIDER` | auto | openai, fastembed, hermes, or none |
-| `NOSHMEM_EMBED_MODEL` | provider default | Embedding model name |
-| `NOSHMEM_EMBED_API_BASE` | provider default | Embedding API URL |
-| `NOSHMEM_EMBED_API_KEY` | `OPENAI_API_KEY` | Embedding API key |
-| `NOSHMEM_API_BASE` | `http://127.0.0.1:8642/v1` | LLM API for extraction |
-| `NOSHMEM_API_KEY` | `API_SERVER_KEY` | LLM API key |
-| `NOSHMEM_MODEL` | `hermes-agent` | Model for extraction |
+| `NOSHY_DB` | `~/.noshy/memories.db` | Database path |
+| `NOSHY_EMBED_PROVIDER` | auto | openai, fastembed, hermes, or none |
+| `NOSHY_EMBED_MODEL` | provider default | Embedding model name |
+| `NOSHY_EMBED_API_BASE` | provider default | Embedding API URL |
+| `NOSHY_EMBED_API_KEY` | `OPENAI_API_KEY` | Embedding API key |
+| `NOSHY_API_BASE` | `http://127.0.0.1:8642/v1` | LLM API for extraction |
+| `NOSHY_API_KEY` | `API_SERVER_KEY` | LLM API key |
+| `NOSHY_MODEL` | `hermes-agent` | Model for extraction |
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────┐
-│              NoshMem MCP Server            │
+│              Noshy MCP Server            │
 │  ┌──────────┐ ┌────────┐ ┌───────────┐  │
 │  │Extractor │ │ Store  │ │  Embedder │  │
 │  │(LLM API) │ │(SQLite)│ │(OpenAI/   │  │
@@ -261,7 +261,7 @@ The schema is compatible — memories, memoirs, concepts, and metadata all trans
 
 ## Comparison
 
-| | ICM | NoshMem |
+| | ICM | Noshy |
 |---|-----|------|
 | Extraction | Rule-based regex | LLM-powered (any provider) |
 | Search | Keyword + vector | Keyword + semantic + graph |

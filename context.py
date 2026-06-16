@@ -1,5 +1,5 @@
 """
-NoshMem context — session-aware memory for Hermes Agent.
+Noshy context — session-aware memory for Hermes Agent.
 
 Features for Hermes users:
 - Session-start context injection ("previously on...")
@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from store import NoshMemStore
+from store import NoshyStore
 from embed import auto_embedder
 
 log = logging.getLogger("aion.context")
@@ -38,7 +38,7 @@ def session_context(*, project: str = None, max_memories: int = 10,
     Returns:
         Formatted context string ready to inject into Hermes
     """
-    store = NoshMemStore(embedder=auto_embedder())
+    store = NoshyStore(embedder=auto_embedder())
 
     sections = []
 
@@ -89,7 +89,7 @@ def session_context(*, project: str = None, max_memories: int = 10,
             sections.insert(0, f"Since your last session: {new_count} new memories recorded.\n")
 
     if not sections:
-        return "No prior context found. NoshMem memory is ready."
+        return "No prior context found. Noshy memory is ready."
 
     return "\n".join(sections)
 
@@ -108,7 +108,7 @@ def decision_timeline(*, project: str = None, days: int = 30, limit: int = 20) -
     Returns:
         Chronological decision timeline
     """
-    store = NoshMemStore()
+    store = NoshyStore()
 
     since = (datetime.utcnow() - timedelta(days=days)).isoformat() if days else None
 
@@ -166,7 +166,7 @@ def detect_patterns(*, project: str = None, min_occurrences: int = 3) -> List[Di
     Returns:
         List of detected patterns with topic, frequency, and suggested action
     """
-    store = NoshMemStore()
+    store = NoshyStore()
 
     query = """
     SELECT topic, COUNT(*) as occurrences, GROUP_CONCAT(summary, ' | ') as summaries,
@@ -271,7 +271,7 @@ def extract_preferences(transcript: str) -> List[Dict]:
 
 # ──────────── Helpers ────────────
 
-def _fetch_important(store: NoshMemStore, importance: str, limit: int = 10,
+def _fetch_important(store: NoshyStore, importance: str, limit: int = 10,
                      project: str = None, since: str = None) -> List[Dict]:
     query = "SELECT * FROM memories WHERE importance = ?"
     params = [importance]
@@ -289,7 +289,7 @@ def _fetch_important(store: NoshMemStore, importance: str, limit: int = 10,
     return [dict(r) for r in store.conn.execute(query, params).fetchall()]
 
 
-def _fetch_decisions(store: NoshMemStore, limit: int = 10, since: str = None,
+def _fetch_decisions(store: NoshyStore, limit: int = 10, since: str = None,
                      project: str = None) -> List[Dict]:
     query = """
     SELECT * FROM memories
@@ -311,7 +311,7 @@ def _fetch_decisions(store: NoshMemStore, limit: int = 10, since: str = None,
     return [dict(r) for r in store.conn.execute(query, params).fetchall()]
 
 
-def _fetch_preferences(store: NoshMemStore, user_name: str = None) -> List[Dict]:
+def _fetch_preferences(store: NoshyStore, user_name: str = None) -> List[Dict]:
     query = """
     SELECT * FROM memories
     WHERE topic LIKE 'pref-%'
@@ -320,7 +320,7 @@ def _fetch_preferences(store: NoshMemStore, user_name: str = None) -> List[Dict]
     return [dict(r) for r in store.conn.execute(query).fetchall()]
 
 
-def _fetch_project_overview(store: NoshMemStore, project: str) -> Dict:
+def _fetch_project_overview(store: NoshyStore, project: str) -> Dict:
     count = store.conn.execute(
         "SELECT COUNT(*) FROM memories WHERE project = ?", [project]
     ).fetchone()[0]
@@ -339,7 +339,7 @@ def _fetch_project_overview(store: NoshMemStore, project: str) -> Dict:
     }
 
 
-def _count_since(store: NoshMemStore, since: str, project: str = None) -> int:
+def _count_since(store: NoshyStore, since: str, project: str = None) -> int:
     query = "SELECT COUNT(*) FROM memories WHERE created_at >= ?"
     params = [since]
     if project:
@@ -352,7 +352,7 @@ def _count_since(store: NoshMemStore, since: str, project: str = None) -> int:
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="NoshMem Context for Hermes")
+    parser = argparse.ArgumentParser(description="Noshy Context for Hermes")
     sub = parser.add_subparsers(dest="cmd")
 
     ctx = sub.add_parser("session-start", help="Generate session-start context")

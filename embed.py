@@ -1,8 +1,8 @@
 """
-NoshMem — persistent memory for AI agents.
+Noshy — persistent memory for AI agents.
 
 ICM-compatible, MCP-native, works with any LLM.
-pip install nosh-mem
+pip install noshy
 """
 import os
 import struct
@@ -26,11 +26,11 @@ class OpenAIEmbedder(Embedder):
     """OpenAI-compatible embeddings (works with OpenAI, Hermes API, vLLM, etc.)"""
     def __init__(self, api_base: str = None, api_key: str = None, model: str = "text-embedding-3-small"):
         self.api_base = api_base or os.environ.get(
-            "NOSHMEM_EMBED_API_BASE",
+            "NOSHY_EMBED_API_BASE",
             os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
         )
-        self.api_key = api_key or os.environ.get("NOSHMEM_EMBED_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
-        self.model = model or os.environ.get("NOSHMEM_EMBED_MODEL", "text-embedding-3-small")
+        self.api_key = api_key or os.environ.get("NOSHY_EMBED_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
+        self.model = model or os.environ.get("NOSHY_EMBED_MODEL", "text-embedding-3-small")
         self._dims = None
 
     def dims(self) -> int:
@@ -60,7 +60,7 @@ class OpenAIEmbedder(Embedder):
 class FastembedEmbedder(Embedder):
     """Local embeddings via fastembed — no API key needed."""
     def __init__(self, model: str = "intfloat/multilingual-e5-base"):
-        self.model_name = model or os.environ.get("NOSHMEM_EMBED_MODEL", "intfloat/multilingual-e5-base")
+        self.model_name = model or os.environ.get("NOSHY_EMBED_MODEL", "intfloat/multilingual-e5-base")
         self._model = None
         self._dims = None
 
@@ -102,7 +102,7 @@ class HermesEmbedder(Embedder):
 def auto_embedder() -> Embedder:
     """Detect the best available embedding provider."""
     # 1. Check for explicit config
-    provider = os.environ.get("NOSHMEM_EMBED_PROVIDER", "")
+    provider = os.environ.get("NOSHY_EMBED_PROVIDER", "")
 
     if provider == "openai":
         return OpenAIEmbedder()

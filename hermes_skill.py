@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-NoshMem Hermes Skill — memory operations as native Hermes Agent tools.
+Noshy Hermes Skill — memory operations as native Hermes Agent tools.
 Drop this into your Hermes workflow for persistent cross-session memory.
 """
 import os
@@ -8,16 +8,16 @@ import sys
 import json
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from store import NoshMemStore
+from store import NoshyStore
 
 # Singleton store
-_store: NoshMemStore = None
+_store: NoshyStore = None
 
 def get_store():
     global _store
     if _store is None:
-        db_path = os.environ.get("NOSHMEM_DB", os.path.expanduser("~/.nosh-mem/memories.db"))
-        _store = NoshMemStore(db_path=db_path)
+        db_path = os.environ.get("NOSHY_DB", os.path.expanduser("~/.noshy/memories.db"))
+        _store = NoshyStore(db_path=db_path)
     return _store
 
 
@@ -94,7 +94,7 @@ def noshmem_summary(project: str = None) -> str:
     
     rows = store.conn.execute(query, params).fetchall()
     
-    lines = [f"NoshMem memory — {stats['memory_count']} memories, {stats['memoir_count']} memoirs, {stats['concept_count']} concepts"]
+    lines = [f"Noshy memory — {stats['memory_count']} memories, {stats['memoir_count']} memoirs, {stats['concept_count']} concepts"]
     lines.append("--- Recent memories ---")
     for r in rows:
         lines.append(f"[{r['importance'].upper()}] {r['topic']}: {r['summary']}")
@@ -124,7 +124,7 @@ def noshmem_link(source_query: str, target_query: str, relation: str = "related"
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="NoshMem Hermes Skill CLI")
+    parser = argparse.ArgumentParser(description="Noshy Hermes Skill CLI")
     sub = parser.add_subparsers(dest="cmd")
     
     p = sub.add_parser("recall")

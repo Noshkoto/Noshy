@@ -1,5 +1,5 @@
 """
-NoshMem session hooks — automatic memory extraction.
+Noshy session hooks — automatic memory extraction.
 Drop this into Hermes as a hook plugin to auto-extract
 memories at session end without manual calls.
 """
@@ -11,7 +11,7 @@ import logging
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from store import NoshMemStore
+from store import NoshyStore
 from extractor import extract_facts
 from embed import auto_embedder
 
@@ -38,7 +38,7 @@ def on_session_end(transcript: str, *, project: str = "default", max_memories: i
     log.info(f"Extracting from {len(transcript)} chars...")
 
     embedder = auto_embedder()
-    store = NoshMemStore(embedder=embedder)
+    store = NoshyStore(embedder=embedder)
 
     facts = extract_facts(transcript)
 
@@ -89,7 +89,7 @@ def on_session_end(transcript: str, *, project: str = "default", max_memories: i
 # hooks:
 #   session_end:
 #     command: "python3"
-#     args: ["/home/openclaw/nosh-mem/hooks.py", "session-end"]
+#     args: ["/home/openclaw/noshy/hooks.py", "session-end"]
 
 def _hermes_hook_handler():
     """Handle Hermes hook invocation via stdin JSON."""
@@ -139,7 +139,7 @@ def daily_sweep(project: str = None):
 
     Call this from a cron job or scheduled task.
     """
-    store = NoshMemStore()
+    store = NoshyStore()
 
     # Decay
     store.decay_weights(decay_rate=0.95)
@@ -177,7 +177,7 @@ def daily_sweep(project: str = None):
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="NoshMem hooks")
+    parser = argparse.ArgumentParser(description="Noshy hooks")
     sub = parser.add_subparsers(dest="cmd")
 
     sub.add_parser("session-end", help="Run session-end extraction (reads stdin JSON)")
