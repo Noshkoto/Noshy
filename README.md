@@ -1,5 +1,6 @@
-# Noshy — Persistent Memory for AI Agents
+![Noshy Architecture Diagram](https://i.ibb.co/qYTN01DC/Chat-GPT-Image-Jun-16-2026-01-38-43-PM.png)
 
+# Noshy — Persistent Memory for AI Agents
 **ICM-compatible. MCP-native. Works with any LLM.**
 
 Noshy gives your AI agent real memory — not note-taking, not context stuffing, not a vector database you have to manage. Store facts, search across sessions, build knowledge graphs. It's what ICM wanted to be, re-built to work everywhere.
