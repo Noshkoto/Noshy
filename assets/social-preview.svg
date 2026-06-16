@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640">
+  <rect width="1280" height="640" fill="#0a0a0a"/>
+  <rect x="40" y="40" width="1200" height="560" rx="24" fill="none" stroke="#1a1a1a" stroke-width="2"/>
+  
+  <!-- Brain icon -->
+  <circle cx="180" cy="280" r="60" fill="none" stroke="#a78bfa" stroke-width="6"/>
+  <path d="M140 280 Q150 220 180 210 Q210 220 220 280" fill="none" stroke="#a78bfa" stroke-width="6"/>
+  <path d="M140 280 Q150 340 180 350 Q210 340 220 280" fill="none" stroke="#a78bfa" stroke-width="6"/>
+  <circle cx="160" cy="260" r="8" fill="#a78bfa"/>
+  <circle cx="200" cy="260" r="8" fill="#a78bfa"/>
+
+  <!-- Title -->
+  <text x="300" y="270" font-size="96" fill="#ffffff" font-family="'Inter', 'SF Pro Display', sans-serif" font-weight="700">NOSHY</text>
+  <text x="300" y="330" font-size="28" fill="#888888" font-family="'Inter', sans-serif">persistent memory for AI agents</text>
+
+  <!-- Bottom row -->
+  <text x="300" y="420" font-size="20" fill="#555555" font-family="monospace">$ curl -fsSL install.noshy.dev | sh</text>
+  
+  <!-- Features -->
+  <text x="300" y="480" font-size="18" fill="#666666" font-family="'Inter', sans-serif">LLM-powered  &middot;  Hybrid search  &middot;  Zero dependencies  &middot;  MCP-native  &middot;  ICM-compatible</text>
+  
+  <!-- Footer -->
+  <text x="640" y="570" font-size="14" fill="#444444" font-family="'Inter', sans-serif" text-anchor="middle">github.com/Noshkoto/Noshy</text>
+</svg>
