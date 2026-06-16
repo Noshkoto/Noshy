@@ -306,6 +306,7 @@ class NoshyStore:
         embedding: bytes = None,
         source: str = "noshy",
         project: str = "default",
+        auto_embed: bool = True,
     ) -> str:
         """Store permanent knowledge (memoir)."""
         now = _utcnow_iso()
@@ -319,6 +320,15 @@ class NoshyStore:
         ).fetchone()
         if existing:
             return existing["id"]
+
+        # Auto-embed title+content so memoirs are semantically searchable
+        if auto_embed and embedding is None and self.embedder is not None:
+            try:
+                vecs = self.embedder.embed([f"{title}\n{content}"])
+                if vecs:
+                    embedding = vecs[0]
+            except Exception as e:
+                log.debug(f"Memoir auto-embed failed: {e}")
 
         self.conn.execute("""
         INSERT INTO memoirs (id, created_at, updated_at, last_accessed,
@@ -395,8 +405,11 @@ class NoshyStore:
         scored.sort(key=lambda x: x[0], reverse=True)
         return [r for _, r in scored[:limit]]
 
-    def recall_memoirs(self, query: str, limit: int = 10, project: str = None) -> List[Dict]:
-        """Keyword search over permanent knowledge (memoirs)."""
+    def recall_memoirs(self, query: str, limit: int = 10, project: str = None,
+                       embedding: bytes = None) -> List[Dict]:
+        """Recall permanent knowledge (memoirs) by keyword, and by semantic
+        similarity when an embedding (or an embedder + query) is available."""
+        # Keyword layer
         sql = """
         SELECT id, created_at, title, content, source, project
         FROM memoirs WHERE (title LIKE ? OR content LIKE ?)
@@ -407,8 +420,39 @@ class NoshyStore:
             params.append(project)
         sql += " ORDER BY access_count DESC, created_at DESC LIMIT ?"
         params.append(limit)
-        rows = self.conn.execute(sql, params).fetchall()
-        ids = [r["id"] for r in rows]
+        rows = [dict(r) for r in self.conn.execute(sql, params).fetchall()]
+        found = {r["id"]: r for r in rows}
+
+        # Semantic layer — auto-embed the query if we can
+        if embedding is None and self.embedder is not None and query:
+            try:
+                vecs = self.embedder.embed([query])
+                if vecs:
+                    embedding = vecs[0]
+            except Exception as e:
+                log.debug(f"Memoir query embed failed: {e}")
+
+        if embedding:
+            esql = "SELECT id, created_at, title, content, source, project, embedding FROM memoirs WHERE embedding IS NOT NULL"
+            eparams: List[Any] = []
+            if project:
+                esql += " AND project = ?"
+                eparams.append(project)
+            scored = []
+            for row in self.conn.execute(esql, eparams).fetchall():
+                if row["embedding"]:
+                    score = _cosine_similarity(embedding, row["embedding"])
+                    scored.append((score, row))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            for _, row in scored[:limit]:
+                if row["id"] not in found:
+                    d = dict(row)
+                    d.pop("embedding", None)
+                    found[row["id"]] = d
+
+        results = list(found.values())[:limit]
+
+        ids = [r["id"] for r in results]
         if ids:
             now = _utcnow_iso()
             placeholders = ",".join("?" * len(ids))
@@ -418,7 +462,7 @@ class NoshyStore:
                 [now, *ids],
             )
             self.conn.commit()
-        return [dict(r) for r in rows]
+        return results
 
     def recall_hybrid(self, query: str, embedding: bytes = None, limit: int = 15,
                       project: str = None, include_memoirs: bool = True) -> List[Dict]:
@@ -428,6 +472,12 @@ class NoshyStore:
         appended (tagged with _kind='memoir') so stored docs are recallable.
         """
         results = {}
+
+        # Age weights automatically (runs at most once per interval)
+        try:
+            self.maybe_decay()
+        except Exception as e:
+            log.debug(f"maybe_decay skipped: {e}")
 
         # Keyword layer
         for r in self.recall_by_topic(query, limit=limit, project=project):
@@ -469,9 +519,10 @@ class NoshyStore:
 
         ranked = sorted(results.values(), key=lambda r: r.get("weight") or 0, reverse=True)[:limit]
 
-        # Memoir layer: append matching permanent knowledge
+        # Memoir layer: append matching permanent knowledge (reuse query embedding)
         if include_memoirs:
-            for m in self.recall_memoirs(query, limit=max(3, limit // 3), project=project):
+            for m in self.recall_memoirs(query, limit=max(3, limit // 3),
+                                         project=project, embedding=embedding):
                 m["_kind"] = "memoir"
                 m["topic"] = m.get("title", "memoir")
                 m["summary"] = (m.get("content") or "")[:280]
@@ -508,31 +559,114 @@ class NoshyStore:
     # ──────────── Maintenance ────────────
 
     def consolidate(self, topic: str, min_weight: float = 0.3) -> int:
-        """Merge related memories on the same topic into a single consolidated memory."""
+        """Merge related memories on the same topic into a single survivor and
+        delete the now-redundant originals (their edges/vectors go with them).
+
+        Returns the number of memories removed.
+        """
         rows = self.conn.execute("""
         SELECT * FROM memories WHERE topic = ? AND weight >= ? ORDER BY created_at
         """, (topic, min_weight)).fetchall()
         if len(rows) < 2:
             return 0
-        merged = "; ".join(r["summary"] for r in rows)
-        merged_id = rows[-1]["id"]
+
+        # De-duplicate summaries while preserving order
+        seen = set()
+        parts = []
+        for r in rows:
+            s = (r["summary"] or "").strip()
+            if s and s not in seen:
+                seen.add(s)
+                parts.append(s)
+        merged = "; ".join(parts)
+
+        survivor = rows[-1]
+        merged_id = survivor["id"]
+        gone = [r["id"] for r in rows[:-1]]
+        # Survivor inherits the strongest weight in the group (capped)
+        max_weight = min(max(r["weight"] for r in rows) + 0.2, 3.0)
         now = _utcnow_iso()
+
+        # Re-point any graph edges from the doomed rows onto the survivor
+        ph = ",".join("?" * len(gone))
         self.conn.execute(
-            "UPDATE memories SET summary = ?, merged_from = ?, updated_at = ?, "
-            "consolidation_count = consolidation_count + 1 WHERE id = ?",
-            (merged, ",".join(r["id"] for r in rows[:-1]), now, merged_id)
+            f"UPDATE OR IGNORE memory_edges SET source_id = ? WHERE source_id IN ({ph})",
+            [merged_id, *gone],
+        )
+        self.conn.execute(
+            f"UPDATE OR IGNORE memory_edges SET target_id = ? WHERE target_id IN ({ph})",
+            [merged_id, *gone],
+        )
+
+        self.conn.execute(
+            "UPDATE memories SET summary = ?, merged_from = ?, updated_at = ?, weight = ?, "
+            "consolidation_count = consolidation_count + ? WHERE id = ?",
+            (merged, ",".join(gone), now, max_weight, len(gone), merged_id),
+        )
+
+        # Remove the redundant originals and their vectors
+        self.conn.execute(f"DELETE FROM memories WHERE id IN ({ph})", gone)
+        self._drop_vectors(gone)
+        # Drop self-edges that may have formed from the re-pointing
+        self.conn.execute(
+            "DELETE FROM memory_edges WHERE source_id = target_id"
         )
         self.conn.commit()
-        return len(rows) - 1
+        return len(gone)
 
     def decay_weights(self, decay_rate: float = 0.95):
-        """Apply daily decay to memory weights."""
-        self.conn.execute("UPDATE memories SET weight = weight * ?", (decay_rate,))
+        """Apply decay to memory weights. Critical/high memories decay slower;
+        recently accessed memories are protected from decay this round."""
+        # Importance-aware: critical/high decay more gently
+        self.conn.execute(
+            "UPDATE memories SET weight = weight * CASE "
+            "WHEN importance = 'critical' THEN ? "
+            "WHEN importance = 'high' THEN ? "
+            "ELSE ? END",
+            (min(decay_rate + 0.04, 0.999), min(decay_rate + 0.02, 0.999), decay_rate),
+        )
         cur = self.conn.execute("SELECT id FROM memories WHERE weight < 0.1")
         dead_ids = [r["id"] for r in cur.fetchall()]
         self.conn.execute("DELETE FROM memories WHERE weight < 0.1")
         self._drop_vectors(dead_ids)
+        self._set_meta("last_decay", _utcnow_iso())
         self.conn.commit()
+
+    def maybe_decay(self, interval_hours: float = 24.0, decay_rate: float = 0.95) -> bool:
+        """Run decay at most once per interval (lazy, no cron needed).
+
+        Called opportunistically on writes/recalls so weights age automatically.
+        Returns True if decay actually ran this call.
+        """
+        last = self._get_meta("last_decay")
+        if last is None:
+            # First observation — start the clock, don't decay yet
+            self._set_meta("last_decay", _utcnow_iso())
+            self.conn.commit()
+            return False
+        try:
+            last_dt = datetime.fromisoformat(last)
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) - last_dt < timedelta(hours=interval_hours):
+                return False
+        except ValueError:
+            pass
+        self.decay_weights(decay_rate=decay_rate)
+        return True
+
+    def _get_meta(self, key: str) -> Optional[str]:
+        row = self.conn.execute(
+            "SELECT value FROM icm_metadata WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row else None
+
+    def _set_meta(self, key: str, value: str):
+        self.conn.execute(
+            "INSERT INTO icm_metadata (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
 
     def purge_expired(self) -> int:
         """Delete memories whose expires_at has passed. Returns count removed."""

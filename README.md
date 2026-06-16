@@ -140,7 +140,23 @@ curl -X POST http://127.0.0.1:8720/tools/call \
 
 # Stats
 curl http://127.0.0.1:8720/stats
+
+# Recent memories (JSON)
+curl 'http://127.0.0.1:8720/memories?limit=25'
 ```
+
+### Web Dashboard
+
+The HTTP server also serves a zero-dependency web dashboard. Start the server
+and open the root URL in a browser:
+
+```bash
+python3 server.py http
+# then visit http://127.0.0.1:8720/
+```
+
+It shows live store stats, recent memories (color-coded by importance), and a
+hybrid search box over both memories and memoirs.
 
 ## Embedding Providers
 
@@ -277,11 +293,14 @@ The schema is compatible — memories, memoirs, concepts, and metadata all trans
 
 ## Roadmap
 
+- [x] Web dashboard
+- [x] Semantic search over memoirs (auto-embedded on store)
+- [x] Automatic, importance-aware memory decay
+- [x] Consolidation that prunes merged duplicates
 - [ ] Graph-based memory consolidation (auto-detect clusters)
 - [ ] Memory importance prediction (LLM scoring)
 - [ ] Streaming extraction (process transcripts as they arrive)
 - [ ] Multi-user / project isolation
-- [ ] Web dashboard
 - [ ] Python decorator for automatic function memory
 
 ## License
