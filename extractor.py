@@ -3,6 +3,7 @@ Noshy extractor — LLM-powered fact extraction from conversation transcripts.
 Uses the Hermes agent (or any OpenAI-compatible API) to extract structured
 memories, keywords, and relationships from raw text.
 """
+import os
 import json
 import time
 import logging
@@ -129,7 +130,7 @@ def extract_facts(
             "id": memory_id,
             "topic": topic,
             "summary": summary,
-            "importances": importance,
+            "importance": importance,
             "keywords": keywords,
             "raw_excerpt": raw,
             "source": "llm-extract",
@@ -209,13 +210,13 @@ def _call_llm(prompt: str, *, api_base: str = None, api_key: str = None, model: 
         "max_tokens": 2000,
     }).encode()
 
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     req = urllib.request.Request(
         f"{api_base}/chat/completions",
         data=body,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
+        headers=headers,
     )
 
     try:
@@ -228,7 +229,3 @@ def _call_llm(prompt: str, *, api_base: str = None, api_key: str = None, model: 
     except Exception as e:
         log.error(f"LLM call failed: {e}")
         return ""
-
-
-# Need to import os at module level
-import os

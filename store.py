@@ -15,10 +15,15 @@ import hashlib
 import logging
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 
 log = logging.getLogger("aion.store")
+
+
+def _utcnow_iso() -> str:
+    """UTC timestamp in ISO-8601 (timezone-aware, no microseconds)."""
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 # ────────────────────────────────────────────────────────────────
 # Constants (ICM-compatible)
@@ -51,12 +56,29 @@ class NoshyStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.embedding_dims = embedding_dims
         self.embedder = embedder
-        self.conn = sqlite3.connect(str(self.db_path))
+        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA busy_timeout=5000")
+        self.conn.execute("PRAGMA foreign_keys=ON")
+        self.vec_enabled = self._try_load_sqlite_vec()
         self._init_schema()
         log.info(f"Noshy store ready: {self.db_path}")
+
+    def _try_load_sqlite_vec(self) -> bool:
+        """Best-effort load of the sqlite-vec extension. Returns True on success."""
+        try:
+            import sqlite_vec  # type: ignore
+        except ImportError:
+            return False
+        try:
+            self.conn.enable_load_extension(True)
+            sqlite_vec.load(self.conn)
+            self.conn.enable_load_extension(False)
+            return True
+        except Exception as e:
+            log.debug(f"sqlite-vec load failed: {e}")
+            return False
 
     def _init_schema(self):
         conn = self.conn
@@ -171,17 +193,20 @@ class NoshyStore:
         CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_extractions(status);
         """)
 
-        # Try to create vec0 table if sqlite-vec is available
-        try:
-            conn.execute("SELECT vec_version()").fetchone()
-            conn.executescript(f"""
-            CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories USING vec0(
-                memory_id TEXT PRIMARY KEY,
-                embedding float[{self.embedding_dims}] distance_metric=cosine
-            );
-            """)
-            log.info("sqlite-vec enabled for vector search")
-        except Exception:
+        # Create vec0 virtual table if the extension was loaded
+        if self.vec_enabled:
+            try:
+                conn.execute(f"""
+                CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories USING vec0(
+                    memory_id TEXT PRIMARY KEY,
+                    embedding float[{self.embedding_dims}] distance_metric=cosine
+                )
+                """)
+                log.info("sqlite-vec enabled for vector search")
+            except Exception as e:
+                log.warning(f"sqlite-vec table create failed: {e}")
+                self.vec_enabled = False
+        else:
             log.info("sqlite-vec not available — using blob-based cosine similarity fallback")
 
     # ──────────── CRUD Operations ────────────
@@ -201,7 +226,7 @@ class NoshyStore:
         auto_embed: bool = True,
     ) -> str:
         """Store a new episodic memory. Returns the memory ID."""
-        now = datetime.utcnow().isoformat()
+        now = _utcnow_iso()
         memory_id = _ulid()
         kw_str = ",".join(keywords) if keywords else None
 
@@ -251,7 +276,7 @@ class NoshyStore:
         project: str = "default",
     ) -> str:
         """Store permanent knowledge (memoir)."""
-        now = datetime.utcnow().isoformat()
+        now = _utcnow_iso()
         memoir_id = _ulid()
         content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
 
@@ -275,8 +300,6 @@ class NoshyStore:
 
     def recall_by_topic(self, topic: str, limit: int = 15, project: str = None) -> List[Dict]:
         """Keyword search on topic + summary."""
-        if not topic or not topic.strip():
-            return []
         query = """
         SELECT {} FROM memories WHERE (topic LIKE ? OR summary LIKE ? OR keywords LIKE ?)
         """.format(SELECT_MEMORY_COLS)
@@ -295,28 +318,40 @@ class NoshyStore:
 
     def recall_semantic(self, embedding: bytes, limit: int = 15, project: str = None) -> List[Dict]:
         """Vector similarity search. Falls back to keyword if no vec index."""
+        if not embedding:
+            return []
+
         # Try vec0 first
-        try:
-            rows = self.conn.execute("""
-            SELECT m.{}
-            FROM vec_memories v
-            JOIN memories m ON v.memory_id = m.id
-            WHERE v.embedding MATCH ?
-            ORDER BY v.distance LIMIT ?
-            """.format(SELECT_MEMORY_COLS.replace(",", ", m.").replace("m.,", "", 1)),
-            (embedding, limit)
-            ).fetchall()
-            if rows:
-                self._touch([r["id"] for r in rows])
-                return [dict(r) for r in rows]
-        except Exception:
-            pass
+        if self.vec_enabled:
+            try:
+                k = max(limit * 4, limit)
+                project_filter = ""
+                params: List[Any] = [embedding, k]
+                if project:
+                    project_filter = " AND m.project = ?"
+                    params.append(project)
+                rows = self.conn.execute(f"""
+                SELECT m.*
+                FROM vec_memories v
+                JOIN memories m ON v.memory_id = m.id
+                WHERE v.embedding MATCH ? AND k = ?{project_filter}
+                ORDER BY v.distance
+                LIMIT ?
+                """, params + [limit]).fetchall()
+                if rows:
+                    self._touch([r["id"] for r in rows])
+                    return [dict(r) for r in rows]
+            except Exception as e:
+                log.debug(f"vec0 search failed, falling back: {e}")
 
         # Fallback: cosine similarity on blob
-        all_rows = self.conn.execute(
-            "SELECT {} FROM memories WHERE embedding IS NOT NULL ORDER BY weight DESC".format(
-                SELECT_MEMORY_COLS)
-        ).fetchall()
+        query = "SELECT {} FROM memories WHERE embedding IS NOT NULL".format(SELECT_MEMORY_COLS)
+        params = []
+        if project:
+            query += " AND project = ?"
+            params.append(project)
+        query += " ORDER BY weight DESC"
+        all_rows = self.conn.execute(query, params).fetchall()
         scored = []
         for row in all_rows:
             if row["embedding"]:
@@ -327,15 +362,21 @@ class NoshyStore:
 
     def recall_hybrid(self, query: str, embedding: bytes = None, limit: int = 15, project: str = None) -> List[Dict]:
         """Combine keyword + semantic + graph recall for best results."""
-        if not query or not query.strip():
-            return []
         results = {}
 
         # Keyword layer
         for r in self.recall_by_topic(query, limit=limit, project=project):
             results[r["id"]] = r
 
-        # Semantic layer
+        # Semantic layer — auto-embed the query if we have an embedder
+        if embedding is None and self.embedder is not None and query:
+            try:
+                vecs = self.embedder.embed([query])
+                if vecs:
+                    embedding = vecs[0]
+            except Exception as e:
+                log.debug(f"Hybrid auto-embed failed: {e}")
+
         if embedding:
             for r in self.recall_semantic(embedding, limit=limit, project=project):
                 if r["id"] not in results:
@@ -345,20 +386,23 @@ class NoshyStore:
         if results:
             id_list = list(results.keys())[:30]
             placeholders = ",".join("?" * len(id_list))
-            graph_rows = self.conn.execute(f"""
-            SELECT m.*, e.relation, e.strength as edge_strength
-            FROM memory_edges e
-            JOIN memories m ON (e.target_id = m.id OR e.source_id = m.id)
-            WHERE (e.source_id IN ({placeholders}) OR e.target_id IN ({placeholders}))
-            AND m.id NOT IN ({placeholders})
-            ORDER BY e.strength DESC LIMIT ?
-            """, id_list + id_list + id_list + [limit]).fetchall()
-            for row in graph_rows:
-                rid = row["id"]
-                if rid not in results:
-                    results[rid] = dict(row)
+            try:
+                graph_rows = self.conn.execute(f"""
+                SELECT m.*, e.relation, e.strength as edge_strength
+                FROM memory_edges e
+                JOIN memories m ON (e.target_id = m.id OR e.source_id = m.id)
+                WHERE (e.source_id IN ({placeholders}) OR e.target_id IN ({placeholders}))
+                AND m.id NOT IN ({placeholders})
+                ORDER BY e.strength DESC LIMIT ?
+                """, id_list + id_list + id_list + [limit]).fetchall()
+                for row in graph_rows:
+                    rid = row["id"]
+                    if rid not in results:
+                        results[rid] = dict(row)
+            except Exception as e:
+                log.debug(f"Graph recall failed: {e}")
 
-        return sorted(results.values(), key=lambda r: r.get("weight", 1), reverse=True)[:limit]
+        return sorted(results.values(), key=lambda r: r.get("weight") or 0, reverse=True)[:limit]
 
     # ──────────── Graph Operations ────────────
 
@@ -367,13 +411,13 @@ class NoshyStore:
         self.conn.execute("""
         INSERT OR REPLACE INTO memory_edges (source_id, target_id, relation, strength, created_at)
         VALUES (?, ?, ?, ?, ?)
-        """, (source_id, target_id, relation, strength, datetime.utcnow().isoformat()))
+        """, (source_id, target_id, relation, strength, _utcnow_iso()))
         self.conn.commit()
 
     def link_concept(self, memory_id: str, concept_name: str, category: str = None) -> str:
         """Link a memory to a concept, creating the concept if needed."""
         concept_id = _hash_id(concept_name.lower())
-        now = datetime.utcnow().isoformat()
+        now = _utcnow_iso()
 
         self.conn.execute("""
         INSERT OR IGNORE INTO concepts (id, name, category, description, created_at, updated_at)
@@ -397,9 +441,11 @@ class NoshyStore:
             return 0
         merged = "; ".join(r["summary"] for r in rows)
         merged_id = rows[-1]["id"]
+        now = _utcnow_iso()
         self.conn.execute(
-            "UPDATE memories SET summary = ?, merged_from = ?, consolidation_count = consolidation_count + 1 WHERE id = ?",
-            (merged, ",".join(r["id"] for r in rows[:-1]), merged_id)
+            "UPDATE memories SET summary = ?, merged_from = ?, updated_at = ?, "
+            "consolidation_count = consolidation_count + 1 WHERE id = ?",
+            (merged, ",".join(r["id"] for r in rows[:-1]), now, merged_id)
         )
         self.conn.commit()
         return len(rows) - 1
@@ -436,22 +482,31 @@ class NoshyStore:
         icm_conn = sqlite3.connect(icm_db_path)
         icm_conn.row_factory = sqlite3.Row
 
-        # Import memories
-        count = 0
-        rows = icm_conn.execute("""
-        SELECT id, created_at, updated_at, last_accessed, access_count, weight,
-               topic, summary, raw_excerpt, keywords, embedding, source, project
-        FROM memories ORDER BY created_at
-        """).fetchall()
+        # Discover which optional columns the source has
+        existing_cols = {
+            r["name"] for r in icm_conn.execute("PRAGMA table_info(memories)").fetchall()
+        }
+        wanted = ["id", "created_at", "updated_at", "last_accessed", "access_count",
+                  "weight", "topic", "summary", "raw_excerpt", "keywords",
+                  "embedding", "source", "project"]
+        cols = [c for c in wanted if c in existing_cols]
+        if "id" not in cols or "topic" not in cols or "summary" not in cols:
+            icm_conn.close()
+            raise ValueError("ICM database missing required columns (id, topic, summary)")
 
+        col_list = ", ".join(cols)
+        placeholders = ", ".join("?" * len(cols))
+        rows = icm_conn.execute(
+            f"SELECT {col_list} FROM memories ORDER BY created_at"
+        ).fetchall()
+
+        count = 0
         for row in rows:
             try:
-                self.conn.execute("""
-                INSERT OR IGNORE INTO memories
-                (id, created_at, updated_at, last_accessed, access_count, weight,
-                 topic, summary, raw_excerpt, keywords, embedding, source, project)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, tuple(row))
+                self.conn.execute(
+                    f"INSERT OR IGNORE INTO memories ({col_list}) VALUES ({placeholders})",
+                    tuple(row[c] for c in cols),
+                )
                 count += 1
             except Exception as e:
                 log.warning(f"Import skipped for {row['id']}: {e}")
@@ -515,7 +570,7 @@ class NoshyStore:
             pass
 
     def _touch(self, memory_ids: List[str]):
-        now = datetime.utcnow().isoformat()
+        now = _utcnow_iso()
         for mid in memory_ids:
             self.conn.execute(
                 "UPDATE memories SET last_accessed = ?, access_count = access_count + 1 WHERE id = ?",

@@ -12,7 +12,7 @@ import os
 import sys
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -20,6 +20,15 @@ from store import NoshyStore
 from embed import auto_embedder
 
 log = logging.getLogger("aion.context")
+
+_shared_store: Optional[NoshyStore] = None
+
+
+def _get_store() -> NoshyStore:
+    global _shared_store
+    if _shared_store is None:
+        _shared_store = NoshyStore(embedder=auto_embedder())
+    return _shared_store
 
 # ──────────── Session Start Context ────────────
 
@@ -38,7 +47,7 @@ def session_context(*, project: str = None, max_memories: int = 10,
     Returns:
         Formatted context string ready to inject into Hermes
     """
-    store = NoshyStore(embedder=auto_embedder())
+    store = _get_store()
 
     sections = []
 
@@ -108,9 +117,9 @@ def decision_timeline(*, project: str = None, days: int = 30, limit: int = 20) -
     Returns:
         Chronological decision timeline
     """
-    store = NoshyStore()
+    store = _get_store()
 
-    since = (datetime.utcnow() - timedelta(days=days)).isoformat() if days else None
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat() if days else None
 
     query = """
     SELECT topic, summary, importance, source, created_at, project
@@ -166,7 +175,7 @@ def detect_patterns(*, project: str = None, min_occurrences: int = 3) -> List[Di
     Returns:
         List of detected patterns with topic, frequency, and suggested action
     """
-    store = NoshyStore()
+    store = _get_store()
 
     query = """
     SELECT topic, COUNT(*) as occurrences, GROUP_CONCAT(summary, ' | ') as summaries,

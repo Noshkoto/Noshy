@@ -9,6 +9,7 @@ import json
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from store import NoshyStore
+from embed import auto_embedder
 
 # Singleton store
 _store: NoshyStore = None
@@ -17,7 +18,7 @@ def get_store():
     global _store
     if _store is None:
         db_path = os.environ.get("NOSHY_DB", os.path.expanduser("~/.noshy/memories.db"))
-        _store = NoshyStore(db_path=db_path)
+        _store = NoshyStore(db_path=db_path, embedder=auto_embedder())
     return _store
 
 
@@ -97,8 +98,9 @@ def noshy_summary(project: str = None) -> str:
     lines = [f"Noshy memory — {stats['memory_count']} memories, {stats['memoir_count']} memoirs, {stats['concept_count']} concepts"]
     lines.append("--- Recent memories ---")
     for r in rows:
-        lines.append(f"[{r['importance'].upper()}] {r['topic']}: {r['summary']}")
-    
+        imp = (r['importance'] or 'medium').upper()
+        lines.append(f"[{imp}] {r['topic']}: {r['summary']}")
+
     return "\n".join(lines)
 
 def noshy_link(source_query: str, target_query: str, relation: str = "related") -> str:

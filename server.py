@@ -173,8 +173,6 @@ def handle_tools_call(params: Dict) -> Dict:
             )
             return {"content": [{"type": "text", "text": f"Memory stored: {mid}"}]}
 
-            return {"content": [{"type": "text", "text": f"Memory stored: {mid}"}]}
-
         elif name == "noshy_store_memoir":
             mid = store.store_memoir(
                 title=args["title"],
@@ -192,7 +190,15 @@ def handle_tools_call(params: Dict) -> Dict:
             if mode == "keyword":
                 results = store.recall_by_topic(query, limit=limit, project=project)
             elif mode == "semantic":
-                results = store.recall_semantic(b"", limit=limit, project=project)
+                embedding = b""
+                if store.embedder is not None:
+                    try:
+                        vecs = store.embedder.embed([query])
+                        if vecs:
+                            embedding = vecs[0]
+                    except Exception as e:
+                        log.debug(f"Query embed failed: {e}")
+                results = store.recall_semantic(embedding, limit=limit, project=project)
             else:
                 results = store.recall_hybrid(query, limit=limit, project=project)
 
@@ -289,7 +295,10 @@ def run_stdio(db_path: str = None):
     store = NoshyStore(db_path=db_path, embedder=embedder)
     log.info(f"Noshy MCP stdio server ready (embed: {type(embedder).__name__})")
 
-    import sys
+    def _send(payload: Dict):
+        sys.stdout.write(json.dumps(payload) + "\n")
+        sys.stdout.flush()
+
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -301,7 +310,8 @@ def run_stdio(db_path: str = None):
 
         method = request.get("method")
         req_id = request.get("id")
-        params = request.get("params", {})
+        params = request.get("params", {}) or {}
+        is_notification = req_id is None
 
         try:
             if method == "initialize":
@@ -310,23 +320,32 @@ def run_stdio(db_path: str = None):
                 result = handle_tools_list(params)
             elif method == "tools/call":
                 result = handle_tools_call(params)
+            elif method in ("notifications/initialized", "initialized"):
+                continue
             elif method == "shutdown":
+                if not is_notification:
+                    _send({"jsonrpc": "2.0", "id": req_id, "result": {}})
                 break
             else:
-                result = {"error": {"code": -32601, "message": f"Unknown method: {method}"}}
+                if not is_notification:
+                    _send({
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {"code": -32601, "message": f"Unknown method: {method}"},
+                    })
+                continue
 
-            response = {"jsonrpc": "2.0", "id": req_id, "result": result}
-            sys.stdout.write(json.dumps(response) + "\n")
-            sys.stdout.flush()
+            if not is_notification:
+                _send({"jsonrpc": "2.0", "id": req_id, "result": result})
 
         except Exception as e:
-            response = {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "error": {"code": -32603, "message": str(e)},
-            }
-            sys.stdout.write(json.dumps(response) + "\n")
-            sys.stdout.flush()
+            log.exception("MCP handler error")
+            if not is_notification:
+                _send({
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {"code": -32603, "message": str(e)},
+                })
 
 
 # ──────────── HTTP API mode ────────────
@@ -340,46 +359,62 @@ def run_http(host: str = "127.0.0.1", port: int = 8720, db_path: str = None):
     from http.server import HTTPServer, BaseHTTPRequestHandler
 
     class Handler(BaseHTTPRequestHandler):
-        def do_POST(self):
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length)) if length > 0 else {}
-
-            if self.path == "/tools/call":
-                result = handle_tools_call({
-                    "name": body.get("name"),
-                    "arguments": body.get("arguments", {}),
-                })
-            elif self.path == "/extract":
-                transcript = body.get("transcript", "")
-                facts = extract_facts(transcript)
-                result = {"memories": facts}
-            elif self.path == "/import-icm":
-                path = body.get("path", "")
-                count = store.import_icm(path)
-                result = {"imported": count}
-            else:
-                result = {"error": "unknown endpoint"}
-
-            self.send_response(200)
+        def _send_json(self, status: int, payload: Dict):
+            data = json.dumps(payload).encode()
+            self.send_response(status)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
             self.end_headers()
-            self.wfile.write(json.dumps(result).encode())
+            self.wfile.write(data)
+
+        def do_POST(self):
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length)) if length > 0 else {}
+            except (ValueError, json.JSONDecodeError) as e:
+                self._send_json(400, {"error": f"bad request: {e}"})
+                return
+
+            try:
+                if self.path == "/tools/call":
+                    result = handle_tools_call({
+                        "name": body.get("name"),
+                        "arguments": body.get("arguments", {}),
+                    })
+                    self._send_json(200, result)
+                elif self.path == "/extract":
+                    transcript = body.get("transcript", "")
+                    facts = extract_facts(transcript)
+                    self._send_json(200, {"memories": facts})
+                elif self.path == "/import-icm":
+                    path = body.get("path", "")
+                    count = store.import_icm(path)
+                    self._send_json(200, {"imported": count})
+                else:
+                    self._send_json(404, {"error": "unknown endpoint"})
+            except Exception as e:
+                log.exception("HTTP POST error")
+                self._send_json(500, {"error": str(e)})
 
         def do_GET(self):
-            if self.path == "/stats":
-                result = store.get_stats()
-            elif self.path == "/tools/list":
-                result = {"tools": MCP_TOOLS}
-            else:
-                result = {"error": "unknown endpoint"}
-
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(result).encode())
+            try:
+                if self.path == "/stats":
+                    self._send_json(200, store.get_stats())
+                elif self.path == "/tools/list":
+                    self._send_json(200, {"tools": MCP_TOOLS})
+                elif self.path == "/health":
+                    self._send_json(200, {"status": "ok"})
+                else:
+                    self._send_json(404, {"error": "unknown endpoint"})
+            except Exception as e:
+                log.exception("HTTP GET error")
+                self._send_json(500, {"error": str(e)})
 
         def log_message(self, format, *args):
-            log.info(f"HTTP {args[0]} {args[1]} {args[2]}")
+            try:
+                log.info("HTTP %s", format % args)
+            except Exception:
+                log.info("HTTP %s", " ".join(str(a) for a in args))
 
     server = HTTPServer((host, port), Handler)
     log.info(f"Noshy HTTP API running on http://{host}:{port}")
@@ -400,7 +435,6 @@ def main():
     http_p = sub.add_parser("http", help="Run as HTTP API server")
     http_p.add_argument("--host", default="127.0.0.1")
     http_p.add_argument("--port", type=int, default=8720)
-    http_p.add_argument("--db", help="Database path", default=None)
 
     # Import
     imp = sub.add_parser("import", help="Import from ICM database")
@@ -425,15 +459,19 @@ def main():
         parser.print_help()
         return
 
-    global store
     db = getattr(args, 'db', None)
-    store = NoshyStore(db_path=db)
 
     if args.command == "mcp":
         run_stdio(db_path=db)
-    elif args.command == "http":
+        return
+    if args.command == "http":
         run_http(args.host, args.port, db_path=db)
-    elif args.command == "import":
+        return
+
+    global store
+    store = NoshyStore(db_path=db, embedder=auto_embedder())
+
+    if args.command == "import":
         count = store.import_icm(args.icm_path)
         print(f"Imported {count} memories from {args.icm_path}")
     elif args.command == "stats":
@@ -443,7 +481,7 @@ def main():
     elif args.command == "recall":
         results = store.recall_hybrid(args.query, limit=args.limit, project=args.project)
         for i, r in enumerate(results, 1):
-            print(f"{i}. [{r.get('importance', 'm').upper()}] {r['topic']}")
+            print(f"{i}. [{(r.get('importance') or 'm').upper()}] {r['topic']}")
             print(f"   {r['summary']}\n")
     elif args.command == "store":
         mid = store.store_memory(

@@ -5,6 +5,7 @@ ICM-compatible, MCP-native, works with any LLM.
 pip install noshy
 """
 import os
+import json
 import struct
 import hashlib
 import logging
@@ -39,19 +40,24 @@ class OpenAIEmbedder(Embedder):
         return self._dims
 
     def embed(self, texts: List[str]) -> List[bytes]:
+        if not texts:
+            return []
         body = json.dumps({"model": self.model, "input": texts}).encode()
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         req = urllib.request.Request(
             f"{self.api_base}/embeddings",
             data=body,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-            },
+            headers=headers,
         )
         try:
             resp = urllib.request.urlopen(req, timeout=30)
             data = json.loads(resp.read())
             return [_pack_floats(d["embedding"]) for d in data["data"]]
+        except urllib.error.HTTPError as e:
+            log.error(f"OpenAI embed failed: HTTP {e.code} {e.reason}")
+            return []
         except Exception as e:
             log.error(f"OpenAI embed failed: {e}")
             return []
@@ -97,17 +103,30 @@ class HermesEmbedder(Embedder):
         return []
 
 
+class NoOpEmbedder(Embedder):
+    """No-op embedder — disables semantic search, keyword search still works."""
+    def dims(self) -> int:
+        return 0
+
+    def embed(self, texts: List[str]) -> List[bytes]:
+        return []
+
+
 # ──────────── Auto-detection ────────────
 
 def auto_embedder() -> Embedder:
     """Detect the best available embedding provider."""
     # 1. Check for explicit config
-    provider = os.environ.get("NOSHY_EMBED_PROVIDER", "")
+    provider = os.environ.get("NOSHY_EMBED_PROVIDER", "").lower()
 
     if provider == "openai":
         return OpenAIEmbedder()
     if provider == "fastembed":
         return FastembedEmbedder()
+    if provider == "hermes":
+        return HermesEmbedder()
+    if provider == "none":
+        return NoOpEmbedder()
 
     # 2. Check for OPENAI_API_KEY
     if os.environ.get("OPENAI_API_KEY"):
@@ -142,6 +161,3 @@ def _pack_floats(arr: List[float]) -> bytes:
 def _unpack_floats(data: bytes) -> List[float]:
     count = len(data) // 4
     return list(struct.unpack(f'{count}f', data[:count * 4]))
-
-
-import json
