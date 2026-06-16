@@ -116,11 +116,13 @@ mcp_servers:
 
 | Tool | What it does |
 |------|-------------|
-| `noshy_store_memory` | Remember a fact, decision, or preference |
+| `noshy_store_memory` | Remember a fact, decision, or preference (optional `ttl_seconds` to auto-expire) |
 | `noshy_store_memoir` | Store permanent knowledge (docs, reference) |
-| `noshy_recall` | Search memories (keyword, semantic, hybrid) |
+| `noshy_recall` | Search memories (keyword, semantic, hybrid) — also surfaces matching memoirs |
 | `noshy_extract_session` | LLM-powered extraction from conversation transcripts |
 | `noshy_consolidate` | Merge related memories on a topic |
+| `noshy_delete` | Remove a memory by id, or all memories under a topic |
+| `noshy_feedback` | Rate a memory +1/-1 to influence how long it survives |
 | `noshy_get_stats` | Database overview |
 
 ### HTTP API

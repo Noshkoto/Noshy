@@ -44,6 +44,7 @@ MCP_TOOLS = [
                 "keywords": {"type": "array", "items": {"type": "string"}, "description": "Keywords for recall"},
                 "importance": {"type": "string", "enum": ["critical", "high", "medium", "low"], "default": "medium"},
                 "project": {"type": "string", "default": "default"},
+                "ttl_seconds": {"type": "integer", "description": "Optional: auto-expire this memory after N seconds"},
             },
             "required": ["topic", "summary"],
         },
@@ -142,6 +143,31 @@ MCP_TOOLS = [
             },
         },
     },
+    {
+        "name": "noshy_delete",
+        "description": "Delete a memory that is wrong or outdated. Provide either an exact memory id, or a topic (optionally scoped to a project) to remove all memories under it.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Exact memory id to delete"},
+                "topic": {"type": "string", "description": "Delete all memories with this topic"},
+                "project": {"type": "string", "description": "Scope a topic delete to one project"},
+            },
+        },
+    },
+    {
+        "name": "noshy_feedback",
+        "description": "Mark a memory as helpful (+1) or unhelpful (-1). Positive feedback helps a memory survive decay; negative feedback lets it fade out sooner.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Memory id to rate"},
+                "score": {"type": "integer", "enum": [-1, 1], "description": "1 for helpful, -1 for unhelpful"},
+                "reason": {"type": "string", "description": "Optional note on why"},
+            },
+            "required": ["id", "score"],
+        },
+    },
 ]
 
 
@@ -170,8 +196,9 @@ def handle_tools_call(params: Dict) -> Dict:
                 keywords=args.get("keywords"),
                 importance=args.get("importance", "medium"),
                 project=args.get("project", "default"),
+                ttl_seconds=args.get("ttl_seconds"),
             )
-            return {"content": [{"type": "text", "text": f"Memory stored: {mid}"}]}
+            return {"content": [{"type": "text", "text": f"Memory stored: {mid} (topic: {args['topic']})"}]}
 
         elif name == "noshy_store_memoir":
             mid = store.store_memoir(
@@ -205,10 +232,13 @@ def handle_tools_call(params: Dict) -> Dict:
             if not results:
                 return {"content": [{"type": "text", "text": "No memories found."}]}
 
-            out = "\n\n".join(
-                f"[{r.get('importance', 'medium').upper()}] {r['topic']}\n{r['summary']}"
-                for r in results
-            )
+            def _fmt(r):
+                if r.get("_kind") == "memoir":
+                    return f"[MEMOIR] {r.get('topic', 'memoir')}\n{r.get('summary', '')}"
+                imp = (r.get("importance") or "medium").upper()
+                return f"[{imp}] {r.get('topic', 'unknown')}\n{r.get('summary', '')}"
+
+            out = "\n\n".join(_fmt(r) for r in results)
             return {"content": [{"type": "text", "text": out}]}
 
         elif name == "noshy_extract_session":
@@ -277,6 +307,26 @@ def handle_tools_call(params: Dict) -> Dict:
                 for p in patterns
             )
             return {"content": [{"type": "text", "text": out}]}
+
+        elif name == "noshy_delete":
+            mem_id = args.get("id")
+            topic = args.get("topic")
+            if mem_id:
+                ok = store.delete_memory(mem_id)
+                msg = f"Deleted memory {mem_id}." if ok else f"No memory found with id {mem_id}."
+            elif topic:
+                n = store.delete_by_topic(topic, project=args.get("project"))
+                msg = f"Deleted {n} memory(ies) under topic '{topic}'."
+            else:
+                return {"content": [{"type": "text", "text": "Provide either 'id' or 'topic' to delete."}], "isError": True}
+            return {"content": [{"type": "text", "text": msg}]}
+
+        elif name == "noshy_feedback":
+            ok = store.record_feedback(args["id"], int(args["score"]), reason=args.get("reason"))
+            if not ok:
+                return {"content": [{"type": "text", "text": f"No memory found with id {args['id']}."}], "isError": True}
+            verb = "boosted" if int(args["score"]) == 1 else "demoted"
+            return {"content": [{"type": "text", "text": f"Feedback recorded — memory {verb}."}]}
 
         else:
             return {"content": [{"type": "text", "text": f"Unknown tool: {name}"}], "isError": True}
@@ -356,7 +406,7 @@ def run_http(host: str = "127.0.0.1", port: int = 8720, db_path: str = None):
     embedder = auto_embedder()
     store = NoshyStore(db_path=db_path, embedder=embedder)
 
-    from http.server import HTTPServer, BaseHTTPRequestHandler
+    from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
     class Handler(BaseHTTPRequestHandler):
         def _send_json(self, status: int, payload: Dict):
@@ -416,9 +466,14 @@ def run_http(host: str = "127.0.0.1", port: int = 8720, db_path: str = None):
             except Exception:
                 log.info("HTTP %s", " ".join(str(a) for a in args))
 
-    server = HTTPServer((host, port), Handler)
+    server = ThreadingHTTPServer((host, port), Handler)
+    server.daemon_threads = True
     log.info(f"Noshy HTTP API running on http://{host}:{port}")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        log.info("Shutting down Noshy HTTP API")
+        server.shutdown()
 
 
 # ──────────── CLI ────────────
