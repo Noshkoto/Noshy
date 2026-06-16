@@ -173,6 +173,8 @@ def handle_tools_call(params: Dict) -> Dict:
             )
             return {"content": [{"type": "text", "text": f"Memory stored: {mid}"}]}
 
+            return {"content": [{"type": "text", "text": f"Memory stored: {mid}"}]}
+
         elif name == "noshy_store_memoir":
             mid = store.store_memoir(
                 title=args["title"],

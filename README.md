@@ -210,7 +210,7 @@ docker run -d --name aion \
 
 ## Configuration
 
-| Env Variable | Default | Description |
+| Variable | Default | Description |
 |-------------|---------|-------------|
 | `NOSHY_DB` | `~/.noshy/memories.db` | Database path |
 | `NOSHY_EMBED_PROVIDER` | auto | openai, fastembed, hermes, or none |

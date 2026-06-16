@@ -275,6 +275,8 @@ class NoshyStore:
 
     def recall_by_topic(self, topic: str, limit: int = 15, project: str = None) -> List[Dict]:
         """Keyword search on topic + summary."""
+        if not topic or not topic.strip():
+            return []
         query = """
         SELECT {} FROM memories WHERE (topic LIKE ? OR summary LIKE ? OR keywords LIKE ?)
         """.format(SELECT_MEMORY_COLS)
@@ -325,6 +327,8 @@ class NoshyStore:
 
     def recall_hybrid(self, query: str, embedding: bytes = None, limit: int = 15, project: str = None) -> List[Dict]:
         """Combine keyword + semantic + graph recall for best results."""
+        if not query or not query.strip():
+            return []
         results = {}
 
         # Keyword layer
