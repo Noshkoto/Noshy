@@ -13,6 +13,7 @@ import time
 import sqlite3
 import hashlib
 import logging
+import threading
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime, timedelta, timezone
@@ -51,30 +52,49 @@ class NoshyStore:
 
     def __init__(self, db_path: str = None, embedding_dims: int = DEFAULT_EMBEDDING_DIMS, embedder=None):
         if db_path is None:
-            db_path = os.path.expanduser("~/.noshy/memories.db")
+            db_path = os.environ.get("NOSHY_DB") or os.path.expanduser("~/.noshy/memories.db")
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.embedding_dims = embedding_dims
         self.embedder = embedder
-        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA busy_timeout=5000")
-        self.conn.execute("PRAGMA foreign_keys=ON")
-        self.vec_enabled = self._try_load_sqlite_vec()
+        # Each thread gets its own SQLite connection. WAL mode (set per
+        # connection) lets concurrent readers coexist with a single writer,
+        # which is what makes the threaded HTTP server safe.
+        self._local = threading.local()
+        self._vec_supported = False
+        self._connect()  # opens the connection and sets self._vec_supported
+        self.vec_enabled = self._vec_supported
         self._init_schema()
         log.info(f"Noshy store ready: {self.db_path}")
 
-    def _try_load_sqlite_vec(self) -> bool:
+    @property
+    def conn(self) -> sqlite3.Connection:
+        """Thread-local SQLite connection (created on first use per thread)."""
+        return self._connect()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            return conn
+        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA foreign_keys=ON")
+        self._vec_supported = self._try_load_sqlite_vec(conn)
+        self._local.conn = conn
+        return conn
+
+    def _try_load_sqlite_vec(self, conn: sqlite3.Connection) -> bool:
         """Best-effort load of the sqlite-vec extension. Returns True on success."""
         try:
             import sqlite_vec  # type: ignore
         except ImportError:
             return False
         try:
-            self.conn.enable_load_extension(True)
-            sqlite_vec.load(self.conn)
-            self.conn.enable_load_extension(False)
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
             return True
         except Exception as e:
             log.debug(f"sqlite-vec load failed: {e}")
@@ -224,11 +244,23 @@ class NoshyStore:
         project: str = "default",
         parent_id: str = None,
         auto_embed: bool = True,
+        ttl_seconds: int = None,
+        expires_at: str = None,
     ) -> str:
-        """Store a new episodic memory. Returns the memory ID."""
+        """Store a new episodic memory. Returns the memory ID.
+
+        Pass ttl_seconds for a relative expiry, or expires_at for an explicit
+        ISO-8601 timestamp. Expired memories are filtered from recall and
+        removed by purge_expired().
+        """
         now = _utcnow_iso()
         memory_id = _ulid()
         kw_str = ",".join(keywords) if keywords else None
+
+        if expires_at is None and ttl_seconds is not None:
+            expires_at = (
+                datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+            ).replace(microsecond=0).isoformat()
 
         # Auto-embed if no embedding provided
         if auto_embed and embedding is None and self.embedder is not None:
@@ -254,10 +286,10 @@ class NoshyStore:
 
         self.conn.execute("""
         INSERT INTO memories (id, created_at, updated_at, last_accessed, weight,
-            topic, summary, raw_excerpt, keywords, embedding, importance, source, project, parent_id)
-        VALUES (?, ?, ?, ?, 1.0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            topic, summary, raw_excerpt, keywords, embedding, importance, source, project, parent_id, expires_at)
+        VALUES (?, ?, ?, ?, 1.0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (memory_id, now, now, now, topic, summary, raw_excerpt,
-              kw_str, embedding, importance, source, project, parent_id))
+              kw_str, embedding, importance, source, project, parent_id, expires_at))
 
         # Store vector if available
         if embedding:
@@ -302,8 +334,9 @@ class NoshyStore:
         """Keyword search on topic + summary."""
         query = """
         SELECT {} FROM memories WHERE (topic LIKE ? OR summary LIKE ? OR keywords LIKE ?)
+        AND (expires_at IS NULL OR expires_at > ?)
         """.format(SELECT_MEMORY_COLS)
-        params = [f"%{topic}%", f"%{topic}%", f"%{topic}%"]
+        params = [f"%{topic}%", f"%{topic}%", f"%{topic}%", _utcnow_iso()]
 
         if project:
             query += " AND project = ?"
@@ -326,7 +359,7 @@ class NoshyStore:
             try:
                 k = max(limit * 4, limit)
                 project_filter = ""
-                params: List[Any] = [embedding, k]
+                params: List[Any] = [embedding, k, _utcnow_iso()]
                 if project:
                     project_filter = " AND m.project = ?"
                     params.append(project)
@@ -334,7 +367,8 @@ class NoshyStore:
                 SELECT m.*
                 FROM vec_memories v
                 JOIN memories m ON v.memory_id = m.id
-                WHERE v.embedding MATCH ? AND k = ?{project_filter}
+                WHERE v.embedding MATCH ? AND k = ?
+                AND (m.expires_at IS NULL OR m.expires_at > ?){project_filter}
                 ORDER BY v.distance
                 LIMIT ?
                 """, params + [limit]).fetchall()
@@ -345,8 +379,9 @@ class NoshyStore:
                 log.debug(f"vec0 search failed, falling back: {e}")
 
         # Fallback: cosine similarity on blob
-        query = "SELECT {} FROM memories WHERE embedding IS NOT NULL".format(SELECT_MEMORY_COLS)
-        params = []
+        query = ("SELECT {} FROM memories WHERE embedding IS NOT NULL "
+                 "AND (expires_at IS NULL OR expires_at > ?)").format(SELECT_MEMORY_COLS)
+        params = [_utcnow_iso()]
         if project:
             query += " AND project = ?"
             params.append(project)
@@ -360,8 +395,38 @@ class NoshyStore:
         scored.sort(key=lambda x: x[0], reverse=True)
         return [r for _, r in scored[:limit]]
 
-    def recall_hybrid(self, query: str, embedding: bytes = None, limit: int = 15, project: str = None) -> List[Dict]:
-        """Combine keyword + semantic + graph recall for best results."""
+    def recall_memoirs(self, query: str, limit: int = 10, project: str = None) -> List[Dict]:
+        """Keyword search over permanent knowledge (memoirs)."""
+        sql = """
+        SELECT id, created_at, title, content, source, project
+        FROM memoirs WHERE (title LIKE ? OR content LIKE ?)
+        """
+        params = [f"%{query}%", f"%{query}%"]
+        if project:
+            sql += " AND project = ?"
+            params.append(project)
+        sql += " ORDER BY access_count DESC, created_at DESC LIMIT ?"
+        params.append(limit)
+        rows = self.conn.execute(sql, params).fetchall()
+        ids = [r["id"] for r in rows]
+        if ids:
+            now = _utcnow_iso()
+            placeholders = ",".join("?" * len(ids))
+            self.conn.execute(
+                f"UPDATE memoirs SET last_accessed = ?, access_count = access_count + 1 "
+                f"WHERE id IN ({placeholders})",
+                [now, *ids],
+            )
+            self.conn.commit()
+        return [dict(r) for r in rows]
+
+    def recall_hybrid(self, query: str, embedding: bytes = None, limit: int = 15,
+                      project: str = None, include_memoirs: bool = True) -> List[Dict]:
+        """Combine keyword + semantic + graph recall for best results.
+
+        When include_memoirs is set, matching permanent-knowledge entries are
+        appended (tagged with _kind='memoir') so stored docs are recallable.
+        """
         results = {}
 
         # Keyword layer
@@ -402,7 +467,17 @@ class NoshyStore:
             except Exception as e:
                 log.debug(f"Graph recall failed: {e}")
 
-        return sorted(results.values(), key=lambda r: r.get("weight") or 0, reverse=True)[:limit]
+        ranked = sorted(results.values(), key=lambda r: r.get("weight") or 0, reverse=True)[:limit]
+
+        # Memoir layer: append matching permanent knowledge
+        if include_memoirs:
+            for m in self.recall_memoirs(query, limit=max(3, limit // 3), project=project):
+                m["_kind"] = "memoir"
+                m["topic"] = m.get("title", "memoir")
+                m["summary"] = (m.get("content") or "")[:280]
+                ranked.append(m)
+
+        return ranked
 
     # ──────────── Graph Operations ────────────
 
@@ -453,8 +528,77 @@ class NoshyStore:
     def decay_weights(self, decay_rate: float = 0.95):
         """Apply daily decay to memory weights."""
         self.conn.execute("UPDATE memories SET weight = weight * ?", (decay_rate,))
+        cur = self.conn.execute("SELECT id FROM memories WHERE weight < 0.1")
+        dead_ids = [r["id"] for r in cur.fetchall()]
         self.conn.execute("DELETE FROM memories WHERE weight < 0.1")
+        self._drop_vectors(dead_ids)
         self.conn.commit()
+
+    def purge_expired(self) -> int:
+        """Delete memories whose expires_at has passed. Returns count removed."""
+        now = _utcnow_iso()
+        cur = self.conn.execute(
+            "SELECT id FROM memories WHERE expires_at IS NOT NULL AND expires_at <= ?",
+            (now,),
+        )
+        ids = [r["id"] for r in cur.fetchall()]
+        if not ids:
+            return 0
+        placeholders = ",".join("?" * len(ids))
+        self.conn.execute(f"DELETE FROM memories WHERE id IN ({placeholders})", ids)
+        self._drop_vectors(ids)
+        self.conn.commit()
+        log.info(f"Purged {len(ids)} expired memories")
+        return len(ids)
+
+    def delete_memory(self, memory_id: str) -> bool:
+        """Delete a single memory by ID. Returns True if a row was removed."""
+        cur = self.conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+        self._drop_vectors([memory_id])
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def delete_by_topic(self, topic: str, project: str = None) -> int:
+        """Delete all memories matching a topic (optionally scoped to a project)."""
+        query = "SELECT id FROM memories WHERE topic = ?"
+        params: List[Any] = [topic]
+        if project:
+            query += " AND project = ?"
+            params.append(project)
+        ids = [r["id"] for r in self.conn.execute(query, params).fetchall()]
+        if not ids:
+            return 0
+        placeholders = ",".join("?" * len(ids))
+        self.conn.execute(f"DELETE FROM memories WHERE id IN ({placeholders})", ids)
+        self._drop_vectors(ids)
+        self.conn.commit()
+        return len(ids)
+
+    def record_feedback(self, memory_id: str, score: int, reason: str = None) -> bool:
+        """Record +1/-1 feedback on a memory and nudge its weight.
+
+        Positive feedback boosts weight (memory survives decay longer);
+        negative feedback shrinks it (decay removes it sooner).
+        """
+        if score not in (-1, 1):
+            raise ValueError("score must be -1 or 1")
+        exists = self.conn.execute(
+            "SELECT 1 FROM memories WHERE id = ?", (memory_id,)
+        ).fetchone()
+        if not exists:
+            return False
+        self.conn.execute(
+            "INSERT INTO feedback (id, memory_id, score, reason, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (_ulid(), memory_id, score, reason, _utcnow_iso()),
+        )
+        delta = 0.5 if score == 1 else -0.5
+        self.conn.execute(
+            "UPDATE memories SET weight = MAX(0.0, MIN(weight + ?, 3.0)) WHERE id = ?",
+            (delta, memory_id),
+        )
+        self.conn.commit()
+        return True
 
     def get_stats(self) -> Dict:
         """Get store statistics."""
@@ -569,13 +713,29 @@ class NoshyStore:
         except Exception:
             pass
 
-    def _touch(self, memory_ids: List[str]):
-        now = _utcnow_iso()
-        for mid in memory_ids:
+    def _drop_vectors(self, memory_ids: List[str]):
+        """Remove vec0 rows for deleted memories (no-op if vec not enabled)."""
+        if not self.vec_enabled or not memory_ids:
+            return
+        try:
+            placeholders = ",".join("?" * len(memory_ids))
             self.conn.execute(
-                "UPDATE memories SET last_accessed = ?, access_count = access_count + 1 WHERE id = ?",
-                (now, mid)
+                f"DELETE FROM vec_memories WHERE memory_id IN ({placeholders})",
+                list(memory_ids),
             )
+        except Exception:
+            pass
+
+    def _touch(self, memory_ids: List[str]):
+        if not memory_ids:
+            return
+        now = _utcnow_iso()
+        placeholders = ",".join("?" * len(memory_ids))
+        self.conn.execute(
+            f"UPDATE memories SET last_accessed = ?, access_count = access_count + 1 "
+            f"WHERE id IN ({placeholders})",
+            [now, *memory_ids],
+        )
         self.conn.commit()
 
 

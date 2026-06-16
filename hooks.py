@@ -133,13 +133,17 @@ def _hermes_hook_handler():
 def daily_sweep(project: str = None):
     """
     Run a daily maintenance sweep:
-    1. Decay old memory weights
-    2. Consolidate related memories
-    3. Report stats
+    1. Purge expired memories
+    2. Decay old memory weights
+    3. Consolidate related memories
+    4. Report stats
 
     Call this from a cron job or scheduled task.
     """
     store = NoshyStore()
+
+    # Purge anything past its TTL
+    purged = store.purge_expired()
 
     # Decay
     store.decay_weights(decay_rate=0.95)
@@ -164,10 +168,12 @@ def daily_sweep(project: str = None):
 
     stats = store.get_stats()
 
-    log.info(f"Daily sweep: decay applied, {consolidated} memories consolidated")
-    log.info(f"Store: {stats['memory_count']} memories, avg weight {stats['avg_weight']:.2f}")
+    avg_w = stats['avg_weight'] or 0.0
+    log.info(f"Daily sweep: {purged} expired purged, decay applied, {consolidated} memories consolidated")
+    log.info(f"Store: {stats['memory_count']} memories, avg weight {avg_w:.2f}")
 
     return {
+        "purged": purged,
         "consolidated": consolidated,
         "stats": stats,
     }
