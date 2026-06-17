@@ -51,6 +51,20 @@ Transcript:
 
 JSON output:"""
 
+IMPORTANCE_PROMPT = """You are a memory importance classifier. Read the memory below and decide how important it is to remember in future sessions.
+
+Memory topic: {topic}
+Memory summary: {summary}
+
+Rules:
+- critical: Security vulnerabilities, data loss, breaking changes, production incidents, irreversible decisions
+- high: Bug fixes, architectural decisions, config changes, deployment changes, performance fixes, user preferences
+- medium: Feature additions, refactoring, tool changes, documentation updates, useful discoveries
+- low: Minor tweaks, cosmetic changes, speculative ideas, general discussion
+
+Output ONLY one word from this set: critical, high, medium, low. No punctuation."""
+
+
 CONSOLIDATION_PROMPT = """You are a memory consolidation engine. Given multiple related memories, merge them into a single consolidated fact.
 
 Input memories (JSON array):
@@ -159,6 +173,83 @@ def extract_facts(
     return results
 
 
+_VALID_IMPORTANCE = {"critical", "high", "medium", "low"}
+
+
+def predict_importance(
+    topic: str,
+    summary: str,
+    *,
+    api_base: str = None,
+    api_key: str = None,
+    model: str = None,
+    default: str = "medium",
+) -> str:
+    """Ask the LLM to classify a memory's importance.
+
+    Returns one of: critical, high, medium, low. Falls back to `default` on
+    any error (no API key, parse failure, network error) so callers can use
+    this as a best-effort enhancement.
+    """
+    if not summary or len(summary.strip()) < 5:
+        return default
+    prompt = IMPORTANCE_PROMPT.format(topic=topic or "(no topic)", summary=summary)
+    response = _call_llm(
+        prompt, api_base=api_base, api_key=api_key, model=model,
+        max_tokens=8, temperature=0.0,
+    )
+    if not response:
+        return default
+    word = response.strip().lower().split()[0].strip(".,'\"")
+    if word in _VALID_IMPORTANCE:
+        return word
+    return default
+
+
+def stream_extract(
+    transcript_chunks,
+    *,
+    api_base: str = None,
+    api_key: str = None,
+    model: str = None,
+    max_memories_per_chunk: int = 4,
+    chunk_overlap: int = 200,
+):
+    """Generator: extract memories incrementally as transcript chunks arrive.
+
+    Yields lists of memory dicts per processed chunk. Buffers a short tail to
+    keep context continuity across chunk boundaries. Use this for long-running
+    sessions where you want extraction to happen as work proceeds, rather than
+    waiting for the entire transcript to finish.
+
+    `transcript_chunks` can be any iterable of strings (streamed lines, gathered
+    tool outputs, etc.).
+    """
+    buf = ""
+    flush_at = 1500
+    for chunk in transcript_chunks:
+        if not chunk:
+            continue
+        buf += chunk
+        if len(buf) < flush_at:
+            continue
+        facts = extract_facts(
+            buf, api_base=api_base, api_key=api_key, model=model,
+            max_memories=max_memories_per_chunk,
+        )
+        if facts:
+            yield facts
+        # Keep a small tail so the next chunk has continuity
+        buf = buf[-chunk_overlap:] if chunk_overlap > 0 else ""
+    if buf.strip():
+        facts = extract_facts(
+            buf, api_base=api_base, api_key=api_key, model=model,
+            max_memories=max_memories_per_chunk,
+        )
+        if facts:
+            yield facts
+
+
 def consolidate_memories(memories: List[Dict], *, api_base: str = None, api_key: str = None, model: str = None) -> Dict:
     """Merge multiple memories on the same topic into one."""
     if len(memories) < 2:
@@ -189,7 +280,9 @@ def consolidate_memories(memories: List[Dict], *, api_base: str = None, api_key:
     return None
 
 
-def _call_llm(prompt: str, *, api_base: str = None, api_key: str = None, model: str = None) -> str:
+def _call_llm(prompt: str, *, api_base: str = None, api_key: str = None,
+              model: str = None, max_tokens: int = 2000,
+              temperature: float = 0.1) -> str:
     """Call an LLM via OpenAI-compatible API."""
     import urllib.request, urllib.error
 
@@ -206,8 +299,8 @@ def _call_llm(prompt: str, *, api_base: str = None, api_key: str = None, model: 
             {"role": "system", "content": "You are a precise fact-extraction engine. Output ONLY valid JSON."},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.1,
-        "max_tokens": 2000,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
     }).encode()
 
     headers = {"Content-Type": "application/json"}

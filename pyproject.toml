@@ -35,4 +35,4 @@ Homepage = "https://github.com/noshkoto/Noshy"
 Repository = "https://github.com/noshkoto/Noshy"
 
 [tool.setuptools]
-py-modules = ["store", "extractor", "embed", "server", "hermes_skill", "hooks", "context"]
+py-modules = ["store", "extractor", "embed", "server", "hermes_skill", "hooks", "context", "decorator", "noshy"]

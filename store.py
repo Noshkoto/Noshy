@@ -252,7 +252,19 @@ class NoshyStore:
         Pass ttl_seconds for a relative expiry, or expires_at for an explicit
         ISO-8601 timestamp. Expired memories are filtered from recall and
         removed by purge_expired().
+
+        Pass importance="auto" to have the LLM score it (falls back to "medium"
+        if no LLM endpoint is configured).
         """
+        # Auto-classify importance via LLM if requested
+        if importance == "auto":
+            try:
+                from extractor import predict_importance
+                importance = predict_importance(topic, summary)
+            except Exception as e:
+                log.debug(f"predict_importance failed: {e}")
+                importance = "medium"
+
         now = _utcnow_iso()
         memory_id = _ulid()
         kw_str = ",".join(keywords) if keywords else None
@@ -667,6 +679,53 @@ class NoshyStore:
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value),
         )
+
+    # ──────────── Project isolation ────────────
+
+    def list_projects(self) -> List[Dict]:
+        """Return projects with per-project counts and last activity."""
+        rows = self.conn.execute("""
+        SELECT project,
+               COUNT(*)            AS memory_count,
+               MAX(created_at)     AS last_activity,
+               AVG(weight)         AS avg_weight
+        FROM memories
+        WHERE (expires_at IS NULL OR expires_at > ?)
+        GROUP BY project
+        ORDER BY last_activity DESC
+        """, (_utcnow_iso(),)).fetchall()
+        out = [dict(r) for r in rows]
+        # Layer in memoir counts per project
+        memoir_counts = {
+            r["project"]: r["c"] for r in self.conn.execute(
+                "SELECT project, COUNT(*) AS c FROM memoirs GROUP BY project"
+            ).fetchall()
+        }
+        for r in out:
+            r["memoir_count"] = memoir_counts.get(r["project"], 0)
+        return out
+
+    def delete_project(self, project: str) -> Dict[str, int]:
+        """Delete ALL memories and memoirs for a project. Returns counts."""
+        if not project or project == "*":
+            raise ValueError("refusing to delete with empty / wildcard project")
+        mem_ids = [
+            r["id"] for r in self.conn.execute(
+                "SELECT id FROM memories WHERE project = ?", (project,)
+            ).fetchall()
+        ]
+        mem_count = len(mem_ids)
+        if mem_count:
+            placeholders = ",".join("?" * mem_count)
+            self.conn.execute(
+                f"DELETE FROM memories WHERE id IN ({placeholders})", mem_ids
+            )
+            self._drop_vectors(mem_ids)
+        memoir_cur = self.conn.execute(
+            "DELETE FROM memoirs WHERE project = ?", (project,)
+        )
+        self.conn.commit()
+        return {"memories": mem_count, "memoirs": memoir_cur.rowcount}
 
     def purge_expired(self) -> int:
         """Delete memories whose expires_at has passed. Returns count removed."""

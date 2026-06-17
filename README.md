@@ -124,6 +124,9 @@ mcp_servers:
 | `noshy_consolidate` | Merge related memories on a topic |
 | `noshy_delete` | Remove a memory by id, or all memories under a topic |
 | `noshy_feedback` | Rate a memory +1/-1 to influence how long it survives |
+| `noshy_list_projects` | List every project with per-project counts and last activity |
+| `noshy_delete_project` | Wipe all memories and memoirs for a project (irreversible) |
+| `noshy_predict_importance` | LLM-classify a candidate fact without storing it |
 | `noshy_get_stats` | Database overview |
 
 ### HTTP API
@@ -158,6 +161,39 @@ python3 server.py http
 
 It shows live store stats, recent memories (color-coded by importance), and a
 hybrid search box over both memories and memoirs.
+
+### Python API
+
+For scripts and apps, Noshy ships a small Python API with decorators that
+make any function self-remembering:
+
+```python
+import noshy
+
+@noshy.remember(topic="deploy", importance="high")
+def deploy(env):
+    return f"deployed to {env}"
+
+deploy("prod")                  # auto-stores: deploy -> 'deployed to prod'
+
+# Scope memories to a project (and inherit tags) for a block of code
+with noshy.session(project="checkout-bugfix", tags=["sprint-23"]):
+    do_work()                   # every @remember inside picks up the project
+
+noshy.recall("deploy")          # hybrid search returns matching memories
+```
+
+Useful keyword arguments on `@noshy.remember`:
+
+- `importance="auto"` — let the LLM classify each memory (critical/high/medium/low)
+- `on_error=True` (default) — exceptions are stored as high-importance memories
+- `capture_args=True` — include arg names in the summary; arguments whose
+  names look like secrets (`password`, `token`, `api_key`, …) are auto-redacted
+- `skip_if=lambda r: r is None` — don't store certain return values
+- `ttl_seconds=…` — auto-expire after N seconds
+
+For long-running sessions, `noshy.extractor.stream_extract(chunks)` yields
+memories incrementally as transcript chunks arrive.
 
 ## Embedding Providers
 
@@ -298,11 +334,12 @@ The schema is compatible — memories, memoirs, concepts, and metadata all trans
 - [x] Semantic search over memoirs (auto-embedded on store)
 - [x] Automatic, importance-aware memory decay
 - [x] Consolidation that prunes merged duplicates
+- [x] Python decorator for automatic function memory (`@noshy.remember`)
+- [x] Memory importance prediction (`importance="auto"`)
+- [x] Streaming extraction (`extractor.stream_extract`)
+- [x] Project isolation (`list_projects` / `delete_project`)
 - [ ] Graph-based memory consolidation (auto-detect clusters)
-- [ ] Memory importance prediction (LLM scoring)
-- [ ] Streaming extraction (process transcripts as they arrive)
-- [ ] Multi-user / project isolation
-- [ ] Python decorator for automatic function memory
+- [ ] Multi-tenant auth / per-user databases
 
 ## License
 

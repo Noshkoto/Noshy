@@ -42,7 +42,7 @@ MCP_TOOLS = [
                 "summary": {"type": "string", "description": "One-sentence factual summary of the memory"},
                 "raw_excerpt": {"type": "string", "description": "Optional verbatim quote from source"},
                 "keywords": {"type": "array", "items": {"type": "string"}, "description": "Keywords for recall"},
-                "importance": {"type": "string", "enum": ["critical", "high", "medium", "low"], "default": "medium"},
+                "importance": {"type": "string", "enum": ["critical", "high", "medium", "low", "auto"], "default": "medium", "description": "Use 'auto' to have the LLM classify it"},
                 "project": {"type": "string", "default": "default"},
                 "ttl_seconds": {"type": "integer", "description": "Optional: auto-expire this memory after N seconds"},
             },
@@ -166,6 +166,34 @@ MCP_TOOLS = [
                 "reason": {"type": "string", "description": "Optional note on why"},
             },
             "required": ["id", "score"],
+        },
+    },
+    {
+        "name": "noshy_list_projects",
+        "description": "List every project that has memories or memoirs, with counts and last-activity timestamps. Useful for understanding what's in the store.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "noshy_delete_project",
+        "description": "Delete ALL memories and memoirs for a project. Use only when you're sure — this cannot be undone.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "Project to wipe"},
+            },
+            "required": ["project"],
+        },
+    },
+    {
+        "name": "noshy_predict_importance",
+        "description": "Ask the LLM to classify a memory's importance (critical/high/medium/low) without storing it. Useful when deciding whether to keep a candidate fact.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "topic": {"type": "string"},
+                "summary": {"type": "string"},
+            },
+            "required": ["summary"],
         },
     },
 ]
@@ -327,6 +355,30 @@ def handle_tools_call(params: Dict) -> Dict:
                 return {"content": [{"type": "text", "text": f"No memory found with id {args['id']}."}], "isError": True}
             verb = "boosted" if int(args["score"]) == 1 else "demoted"
             return {"content": [{"type": "text", "text": f"Feedback recorded — memory {verb}."}]}
+
+        elif name == "noshy_list_projects":
+            projects = store.list_projects()
+            if not projects:
+                return {"content": [{"type": "text", "text": "No projects yet."}]}
+            lines = []
+            for p in projects:
+                last = (p.get("last_activity") or "")[:10]
+                lines.append(
+                    f"{p['project']}: {p['memory_count']} memories, "
+                    f"{p['memoir_count']} memoirs (last: {last})"
+                )
+            return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+
+        elif name == "noshy_delete_project":
+            counts = store.delete_project(args["project"])
+            return {"content": [{"type": "text",
+                "text": f"Deleted project '{args['project']}': "
+                        f"{counts['memories']} memories, {counts['memoirs']} memoirs."}]}
+
+        elif name == "noshy_predict_importance":
+            from extractor import predict_importance
+            score = predict_importance(args.get("topic", ""), args["summary"])
+            return {"content": [{"type": "text", "text": score}]}
 
         else:
             return {"content": [{"type": "text", "text": f"Unknown tool: {name}"}], "isError": True}
@@ -617,6 +669,8 @@ def run_http(host: str = "127.0.0.1", port: int = 8720, db_path: str = None):
                     params.append(limit)
                     rows = [dict(r) for r in store.conn.execute(sql, params).fetchall()]
                     self._send_json(200, {"memories": rows})
+                elif path == "/projects":
+                    self._send_json(200, {"projects": store.list_projects()})
                 elif path == "/tools/list":
                     self._send_json(200, {"tools": MCP_TOOLS})
                 elif path == "/health":
