@@ -584,304 +584,689 @@ def run_stdio(db_path: str = None):
 # ──────────── Web Dashboard ────────────
 
 DASHBOARD_HTML = r"""<!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Noshy — Memory Dashboard</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Noshy — Memory</title>
 <style>
-  :root, [data-theme="dark"] {
-    --bg:#0e1117; --panel:#161b22; --border:#272e3a; --text:#e6edf3;
-    --muted:#8b949e; --accent:#5b8def; --crit:#f85149; --high:#d29922;
-    --med:#3fb950; --low:#6e7681; --danger:#f85149; --overlay:rgba(0,0,0,.6);
-  }
-  [data-theme="light"] {
-    --bg:#f6f8fa; --panel:#ffffff; --border:#d8dde3; --text:#1f2328;
-    --muted:#57606a; --accent:#0969da; --crit:#cf222e; --high:#9a6700;
-    --med:#1a7f37; --low:#6e7781; --danger:#cf222e; --overlay:rgba(0,0,0,.35);
-  }
-  * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--text);
-    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-    transition:background .15s, color .15s; }
-  header { padding:20px 28px; border-bottom:1px solid var(--border);
-    display:flex; align-items:center; gap:14px; }
-  header h1 { margin:0; font-size:20px; font-weight:650; }
-  header .dot { width:10px; height:10px; border-radius:50%; background:var(--med); }
-  header .spacer { flex:1; }
-  .icon-btn { background:transparent; border:1px solid var(--border); color:var(--text);
-    border-radius:8px; padding:6px 10px; cursor:pointer; font-size:13px; }
-  .icon-btn:hover { background:var(--panel); }
-  .wrap { max-width:1100px; margin:0 auto; padding:24px 28px; }
-  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
-    gap:14px; margin-bottom:18px; }
-  .stat { background:var(--panel); border:1px solid var(--border); border-radius:10px;
-    padding:16px 18px; }
-  .stat .n { font-size:26px; font-weight:700; }
-  .stat .l { color:var(--muted); font-size:12px; text-transform:uppercase;
-    letter-spacing:.04em; margin-top:4px; }
-  .controls { display:flex; gap:10px; margin-bottom:14px; flex-wrap:wrap; align-items:center; }
-  .controls input, .controls select { background:var(--panel); border:1px solid var(--border);
-    border-radius:8px; padding:10px 12px; color:var(--text); font-size:14px;
-    font-family:inherit; }
-  .controls input { flex:1; min-width:240px; }
-  .controls button { background:var(--accent); border:0; border-radius:8px;
-    color:#fff; padding:0 16px; font-weight:600; cursor:pointer; font-size:14px; }
-  .controls button.secondary { background:transparent; color:var(--text);
-    border:1px solid var(--border); }
-  .controls button:hover { filter:brightness(1.08); }
-  .controls button.secondary:hover { background:var(--panel); }
-  .mem { background:var(--panel); border:1px solid var(--border); border-radius:10px;
-    padding:14px 16px; margin-bottom:10px; display:flex; gap:14px; align-items:flex-start;
-    position:relative; transition:border-color .15s; }
-  .mem:hover { border-color:var(--accent); }
-  .mem:hover .del { opacity:1; }
-  .badge { flex:none; font-size:10px; font-weight:700; padding:3px 8px; border-radius:5px;
-    text-transform:uppercase; letter-spacing:.03em; margin-top:2px; }
-  .b-critical{background:rgba(248,81,73,.16);color:var(--crit);}
-  .b-high{background:rgba(210,153,34,.16);color:var(--high);}
-  .b-medium{background:rgba(63,185,80,.16);color:var(--med);}
-  .b-low{background:rgba(110,118,129,.16);color:var(--low);}
-  .b-memoir{background:rgba(91,141,239,.16);color:var(--accent);}
-  .mem .body { flex:1; min-width:0; }
-  .mem .topic { font-weight:600; }
-  .mem .summary { color:var(--muted); margin-top:2px; word-wrap:break-word; }
-  .mem .meta { color:var(--low); font-size:11px; margin-top:6px; }
-  .del { opacity:0; background:transparent; border:0; color:var(--danger);
-    cursor:pointer; font-size:18px; line-height:1; padding:4px 6px;
-    transition:opacity .15s; }
-  .del:hover { background:rgba(248,81,73,.12); border-radius:6px; }
-  .empty { color:var(--muted); text-align:center; padding:40px; }
-  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.05em;
-    color:var(--muted); margin:24px 0 12px; }
-  /* Modal */
-  .modal-bg { position:fixed; inset:0; background:var(--overlay); display:none;
-    align-items:center; justify-content:center; padding:24px; z-index:100; }
-  .modal-bg.open { display:flex; }
-  .modal { background:var(--bg); border:1px solid var(--border); border-radius:12px;
-    max-width:720px; width:100%; max-height:80vh; overflow:auto; padding:24px; }
-  .modal h3 { margin:0 0 16px; }
-  .cluster { border:1px solid var(--border); border-radius:8px; padding:12px;
-    margin-bottom:10px; }
-  .cluster-head { display:flex; justify-content:space-between; align-items:center;
-    margin-bottom:8px; font-weight:600; }
-  .cluster-item { color:var(--muted); font-size:12px; padding:4px 0;
-    border-top:1px dashed var(--border); }
-  .cluster-item:first-of-type { border-top:0; }
-  .modal-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:16px; }
+/* ── TOKENS ─────────────────────────────────────────── */
+:root {
+  --bg:#080b12; --surface:rgba(255,255,255,.038); --surface2:rgba(255,255,255,.07);
+  --border:rgba(255,255,255,.08); --border-h:rgba(99,102,241,.55);
+  --text:#e2e4f0; --muted:#6b7280; --dim:rgba(255,255,255,.12);
+  --accent:#6366f1; --accent2:#8b5cf6;
+  --grad:linear-gradient(135deg,#6366f1 0%,#8b5cf6 100%);
+  --glow:0 0 22px rgba(99,102,241,.28);
+  --crit:#ef4444; --crit-bg:rgba(239,68,68,.13);
+  --high:#f59e0b; --high-bg:rgba(245,158,11,.13);
+  --med:#10b981;  --med-bg:rgba(16,185,129,.13);
+  --low:#6b7280;  --low-bg:rgba(107,114,128,.13);
+  --memoir:#6366f1; --memoir-bg:rgba(99,102,241,.13);
+  --danger:#ef4444; --overlay:rgba(0,0,0,.78);
+  --r:14px; --rs:8px; --blur:blur(18px);
+  --shadow:0 6px 32px rgba(0,0,0,.45); --tr:.18s ease;
+}
+[data-theme="light"] {
+  --bg:#f3f4ff; --surface:rgba(255,255,255,.82); --surface2:rgba(255,255,255,.96);
+  --border:rgba(99,102,241,.14); --border-h:rgba(99,102,241,.5);
+  --text:#1a1b2e; --muted:#6b7280; --dim:rgba(0,0,0,.08);
+  --accent:#4f46e5; --accent2:#7c3aed;
+  --grad:linear-gradient(135deg,#4f46e5 0%,#7c3aed 100%);
+  --glow:0 0 22px rgba(79,70,229,.18);
+  --crit:#dc2626; --crit-bg:rgba(220,38,38,.1);
+  --high:#d97706; --high-bg:rgba(217,119,6,.1);
+  --med:#059669;  --med-bg:rgba(5,150,105,.1);
+  --low:#9ca3af;  --low-bg:rgba(156,163,175,.1);
+  --memoir:#4f46e5; --memoir-bg:rgba(79,70,229,.1);
+  --danger:#dc2626; --overlay:rgba(0,0,0,.42);
+  --shadow:0 6px 32px rgba(0,0,0,.13);
+}
+/* ── RESET ──────────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{height:100%}
+body{background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden;
+  font:15px/1.55 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;}
+button{cursor:pointer;font-family:inherit;border:none;background:none;}
+input,select{font-family:inherit;outline:none;}
+/* ── BACKGROUND ART ─────────────────────────────────── */
+.bg-art{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden;}
+.orb{position:absolute;border-radius:50%;filter:blur(90px);
+  animation:float 14s ease-in-out infinite;}
+.orb-1{width:640px;height:520px;opacity:.28;
+  background:radial-gradient(circle,rgba(99,102,241,.7) 0%,transparent 70%);
+  top:-18%;left:-8%;animation-delay:0s;}
+.orb-2{width:500px;height:620px;opacity:.22;
+  background:radial-gradient(circle,rgba(139,92,246,.65) 0%,transparent 70%);
+  top:28%;right:-6%;animation-delay:-6s;}
+.orb-3{width:420px;height:420px;opacity:.18;
+  background:radial-gradient(circle,rgba(99,102,241,.5) 0%,transparent 70%);
+  bottom:-12%;left:38%;animation-delay:-11s;}
+[data-theme="light"] .orb{opacity:.12;}
+@keyframes float{
+  0%,100%{transform:translate(0,0) scale(1);}
+  33%{transform:translate(22px,-28px) scale(1.04);}
+  66%{transform:translate(-16px,18px) scale(.97);}
+}
+.bg-grid{position:fixed;inset:0;z-index:0;pointer-events:none;
+  background-image:linear-gradient(rgba(255,255,255,.016) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(255,255,255,.016) 1px,transparent 1px);
+  background-size:44px 44px;}
+[data-theme="light"] .bg-grid{
+  background-image:linear-gradient(rgba(99,102,241,.04) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(99,102,241,.04) 1px,transparent 1px);}
+/* ── LAYOUT ─────────────────────────────────────────── */
+#app{position:relative;z-index:1;display:flex;flex-direction:column;min-height:100vh;}
+/* ── HEADER ─────────────────────────────────────────── */
+header{position:sticky;top:0;z-index:50;height:62px;
+  backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
+  background:rgba(8,11,18,.86);border-bottom:1px solid var(--border);
+  padding:0 26px;display:flex;align-items:center;gap:12px;}
+[data-theme="light"] header{background:rgba(243,244,255,.9);}
+.logo{display:flex;align-items:center;gap:10px;text-decoration:none;}
+.logo-icon{width:32px;height:32px;background:var(--grad);border-radius:9px;
+  display:flex;align-items:center;justify-content:center;
+  box-shadow:0 0 18px rgba(99,102,241,.35);flex-shrink:0;}
+.logo-icon svg{width:18px;height:18px;}
+.logo-name{font-size:17px;font-weight:760;letter-spacing:-.03em;
+  background:var(--grad);-webkit-background-clip:text;
+  -webkit-text-fill-color:transparent;background-clip:text;}
+.logo-ver{background:var(--surface2);border:1px solid var(--border);
+  border-radius:999px;padding:2px 8px;font-size:11px;color:var(--muted);
+  display:none;}
+@media(min-width:520px){.logo-ver{display:block;}}
+.hgap{flex:1;}
+.status-pill{display:flex;align-items:center;gap:7px;background:var(--surface);
+  border:1px solid var(--border);border-radius:999px;padding:5px 12px;
+  font-size:12px;color:var(--muted);}
+.sdot{width:7px;height:7px;border-radius:50%;background:var(--med);
+  animation:pulse-dot 2.6s ease-in-out infinite;}
+@keyframes pulse-dot{0%,100%{box-shadow:0 0 5px var(--med);}
+  50%{box-shadow:0 0 13px var(--med),0 0 4px var(--med);}}
+.hdr-sel{background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--rs);padding:7px 10px;color:var(--text);font-size:13px;
+  cursor:pointer;transition:border-color var(--tr);max-width:140px;}
+.hdr-sel:hover,.hdr-sel:focus{border-color:var(--border-h);}
+.hdr-btn{display:flex;align-items:center;gap:6px;background:var(--surface);
+  border:1px solid var(--border);border-radius:var(--rs);padding:7px 12px;
+  color:var(--text);font-size:13px;transition:all var(--tr);}
+.hdr-btn svg{width:14px;height:14px;flex-shrink:0;}
+.hdr-btn:hover{background:var(--surface2);border-color:var(--border-h);
+  color:var(--accent);box-shadow:var(--glow);}
+.hdr-btn.ico{padding:7px;}
+/* ── MAIN ───────────────────────────────────────────── */
+main{max-width:1060px;margin:0 auto;width:100%;padding:26px 22px 64px;}
+/* ── STATS ──────────────────────────────────────────── */
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));
+  gap:12px;margin-bottom:22px;}
+.stat-card{background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--r);padding:18px 18px 14px;
+  backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+  transition:all var(--tr);position:relative;overflow:hidden;}
+.stat-card::after{content:'';position:absolute;top:0;left:0;right:0;height:2px;
+  background:var(--grad);opacity:0;transition:opacity var(--tr);}
+.stat-card:hover{border-color:var(--border-h);transform:translateY(-2px);
+  box-shadow:var(--shadow);}
+.stat-card:hover::after{opacity:1;}
+.si{width:34px;height:34px;border-radius:9px;background:var(--surface2);
+  border:1px solid var(--border);display:flex;align-items:center;
+  justify-content:center;margin-bottom:11px;color:var(--accent);}
+.si svg{width:16px;height:16px;}
+.sv{font-size:28px;font-weight:760;letter-spacing:-.045em;line-height:1;
+  background:var(--grad);-webkit-background-clip:text;
+  -webkit-text-fill-color:transparent;background-clip:text;}
+.sl{font-size:11px;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.07em;margin-top:4px;}
+/* ── SEARCH ─────────────────────────────────────────── */
+.search-wrap{display:flex;gap:9px;align-items:stretch;
+  margin-bottom:18px;flex-wrap:wrap;}
+.search-field{flex:1;min-width:210px;position:relative;display:flex;}
+.search-field svg{position:absolute;left:13px;top:50%;
+  transform:translateY(-50%);color:var(--muted);width:15px;height:15px;}
+.search-field input{width:100%;background:var(--surface);
+  border:1px solid var(--border);border-radius:var(--rs);
+  padding:10px 13px 10px 38px;color:var(--text);font-size:14px;
+  transition:all var(--tr);}
+.search-field input::placeholder{color:var(--muted);}
+.search-field input:focus{border-color:var(--accent);background:var(--surface2);
+  box-shadow:0 0 0 3px rgba(99,102,241,.16);}
+.btn-p{display:inline-flex;align-items:center;gap:6px;
+  background:var(--grad);border-radius:var(--rs);padding:10px 17px;
+  color:#fff;font-size:14px;font-weight:620;white-space:nowrap;
+  transition:all var(--tr);}
+.btn-p:hover{filter:brightness(1.1);box-shadow:var(--glow);transform:translateY(-1px);}
+.btn-p:active{transform:none;}
+.btn-g{display:inline-flex;align-items:center;gap:6px;
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--rs);padding:10px 15px;color:var(--text);
+  font-size:14px;white-space:nowrap;transition:all var(--tr);}
+.btn-g:hover{background:var(--surface2);border-color:var(--border-h);}
+.btn-d{display:inline-flex;align-items:center;gap:6px;
+  background:var(--crit-bg);border:1px solid rgba(239,68,68,.28);
+  border-radius:var(--rs);padding:9px 14px;color:var(--crit);
+  font-size:13px;transition:all var(--tr);}
+.btn-d:hover{background:rgba(239,68,68,.22);}
+.btn-sm{padding:6px 11px;font-size:13px;}
+/* ── SECTION ROW ────────────────────────────────────── */
+.sec-row{display:flex;align-items:center;gap:9px;margin:2px 0 13px;}
+.sec-title{font-size:11px;font-weight:720;text-transform:uppercase;
+  letter-spacing:.08em;color:var(--muted);}
+.sec-chip{background:var(--surface2);border:1px solid var(--border);
+  border-radius:999px;padding:2px 9px;font-size:11px;color:var(--muted);}
+/* ── MEMORY CARDS ───────────────────────────────────── */
+.mem-list{display:flex;flex-direction:column;gap:8px;}
+.mem{background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--r);padding:13px 15px;
+  display:flex;gap:13px;align-items:flex-start;
+  backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+  transition:all var(--tr);position:relative;overflow:hidden;}
+.mem::before{content:'';position:absolute;left:0;top:0;bottom:0;
+  width:3px;border-radius:3px 0 0 3px;}
+.mem.ic::before{background:var(--crit);}
+.mem.ih::before{background:var(--high);}
+.mem.im::before{background:var(--med);}
+.mem.il::before{background:var(--low);}
+.mem.io::before{background:var(--memoir);}
+.mem:hover{border-color:var(--border-h);transform:translateX(3px);
+  box-shadow:var(--shadow);}
+.mem:hover .mdel{opacity:1;transform:scale(1);}
+.badge{flex:none;font-size:10px;font-weight:720;padding:3px 9px;
+  border-radius:999px;text-transform:uppercase;letter-spacing:.04em;
+  margin-top:1px;white-space:nowrap;}
+.b-critical{background:var(--crit-bg);color:var(--crit);
+  box-shadow:0 0 8px rgba(239,68,68,.18);}
+.b-high{background:var(--high-bg);color:var(--high);
+  box-shadow:0 0 8px rgba(245,158,11,.14);}
+.b-medium{background:var(--med-bg);color:var(--med);}
+.b-low{background:var(--low-bg);color:var(--low);}
+.b-memoir{background:var(--memoir-bg);color:var(--memoir);}
+.mbody{flex:1;min-width:0;}
+.mtopic{font-weight:650;font-size:14px;}
+.msum{color:var(--muted);margin-top:3px;font-size:13.5px;
+  line-height:1.5;word-break:break-word;}
+.mmeta{color:var(--dim);font-size:11px;margin-top:6px;
+  display:flex;gap:8px;flex-wrap:wrap;}
+.mdel{opacity:0;transform:scale(.82);flex:none;
+  width:30px;height:30px;display:flex;align-items:center;
+  justify-content:center;border-radius:var(--rs);
+  border:1px solid transparent;color:var(--danger);
+  transition:all var(--tr);align-self:flex-start;background:transparent;}
+.mdel:hover{background:var(--crit-bg);border-color:rgba(239,68,68,.3);}
+.mdel svg{width:14px;height:14px;}
+/* ── EMPTY / SKELETON ───────────────────────────────── */
+.empty-state{text-align:center;padding:56px 20px;color:var(--muted);}
+.empty-state svg{width:44px;height:44px;color:var(--dim);
+  margin:0 auto 14px;display:block;}
+.empty-state p{font-size:15px;margin-bottom:4px;}
+.empty-state small{font-size:13px;color:var(--dim);}
+.skel{background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--r);padding:16px 15px;margin-bottom:8px;}
+.sl-line{height:11px;border-radius:4px;
+  background:linear-gradient(90deg,var(--surface2) 25%,var(--surface) 50%,var(--surface2) 75%);
+  background-size:400% 100%;animation:shimmer 1.7s infinite;}
+.sl-line+.sl-line{margin-top:9px;}
+@keyframes shimmer{0%{background-position:100% 0}100%{background-position:-100% 0}}
+/* ── MODAL ──────────────────────────────────────────── */
+.moverlay{position:fixed;inset:0;background:var(--overlay);display:none;
+  align-items:center;justify-content:center;padding:20px;z-index:200;
+  backdrop-filter:blur(5px);-webkit-backdrop-filter:blur(5px);}
+.moverlay.open{display:flex;}
+.mcard{background:var(--bg);border:1px solid var(--border);border-radius:18px;
+  max-width:680px;width:100%;max-height:82vh;display:flex;flex-direction:column;
+  box-shadow:0 28px 90px rgba(0,0,0,.65);animation:min .22s ease;overflow:hidden;}
+@keyframes min{from{opacity:0;transform:scale(.94) translateY(10px);}
+  to{opacity:1;transform:none;}}
+.mhd{padding:18px 22px 15px;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;justify-content:space-between;}
+.mhd h3{font-size:15px;font-weight:650;}
+.mclose{width:28px;height:28px;display:flex;align-items:center;
+  justify-content:center;background:var(--surface);border:1px solid var(--border);
+  border-radius:7px;color:var(--muted);font-size:17px;transition:all var(--tr);}
+.mclose:hover{color:var(--text);border-color:var(--border-h);}
+.mbod{flex:1;overflow-y:auto;padding:18px 22px;}
+.mft{padding:14px 22px;border-top:1px solid var(--border);
+  display:flex;justify-content:flex-end;gap:9px;}
+.clu-card{background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--r);margin-bottom:9px;overflow:hidden;}
+.clu-head{padding:11px 15px;display:flex;align-items:center;gap:9px;
+  border-bottom:1px solid var(--border);background:var(--surface2);}
+.clu-num{background:var(--grad);color:#fff;border-radius:999px;
+  width:21px;height:21px;display:flex;align-items:center;justify-content:center;
+  font-size:10px;font-weight:720;flex-shrink:0;}
+.clu-ttl{font-weight:620;font-size:13px;flex:1;}
+.clu-cnt{font-size:11px;color:var(--muted);background:var(--surface);
+  border:1px solid var(--border);border-radius:999px;padding:1px 8px;}
+.clu-item{padding:9px 15px;border-bottom:1px solid var(--border);font-size:12.5px;}
+.clu-item:last-child{border-bottom:none;}
+.clu-item strong{color:var(--text);}
+.clu-item span{color:var(--muted);}
+/* ── CONFIRM ────────────────────────────────────────── */
+.cov{position:fixed;inset:0;z-index:300;background:var(--overlay);display:none;
+  align-items:center;justify-content:center;padding:20px;
+  backdrop-filter:blur(5px);-webkit-backdrop-filter:blur(5px);}
+.cov.open{display:flex;}
+.ccard{background:var(--bg);border:1px solid var(--border);border-radius:16px;
+  padding:26px 26px 22px;max-width:360px;width:100%;
+  box-shadow:0 28px 80px rgba(0,0,0,.55);animation:min .2s ease;}
+.ccard h4{font-size:16px;margin-bottom:7px;}
+.ccard p{font-size:13.5px;color:var(--muted);line-height:1.5;margin-bottom:18px;}
+.cacts{display:flex;gap:9px;justify-content:flex-end;}
+/* ── TOASTS ─────────────────────────────────────────── */
+#tc{position:fixed;bottom:22px;right:22px;z-index:500;
+  display:flex;flex-direction:column;gap:7px;pointer-events:none;}
+.toast{background:var(--surface2);border:1px solid var(--border);border-radius:10px;
+  padding:11px 15px;font-size:13.5px;
+  backdrop-filter:var(--blur);-webkit-backdrop-filter:var(--blur);
+  box-shadow:var(--shadow);pointer-events:all;
+  display:flex;align-items:center;gap:9px;
+  min-width:220px;max-width:360px;animation:tin .23s ease;}
+@keyframes tin{from{opacity:0;transform:translateX(14px);}to{opacity:1;transform:none;}}
+.toast.ok{border-color:rgba(16,185,129,.35);}
+.toast.err{border-color:rgba(239,68,68,.35);}
+.tico{width:15px;height:15px;flex-shrink:0;}
+.toast.ok .tico{color:var(--med);}
+.toast.err .tico{color:var(--crit);}
+/* ── SCROLLBAR ──────────────────────────────────────── */
+::-webkit-scrollbar{width:5px;height:5px;}
+::-webkit-scrollbar-track{background:transparent;}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px;}
+::-webkit-scrollbar-thumb:hover{background:var(--muted);}
 </style>
 </head>
 <body>
+<div class="bg-art" aria-hidden="true">
+  <div class="orb orb-1"></div><div class="orb orb-2"></div><div class="orb orb-3"></div>
+</div>
+<div class="bg-grid" aria-hidden="true"></div>
+<div id="app">
+
+<!-- HEADER -->
 <header>
-  <span class="dot"></span><h1>Noshy</h1>
-  <span style="color:var(--muted)">persistent memory dashboard</span>
-  <span class="spacer"></span>
-  <button class="icon-btn" id="clusterBtn" title="Find clusters of near-duplicate memories">Clusters</button>
-  <button class="icon-btn" id="themeBtn" title="Toggle theme">🌙</button>
-</header>
-<div class="wrap">
-  <div class="stats" id="stats"></div>
-  <div class="controls">
-    <input id="q" placeholder="Search memories &amp; memoirs…" autofocus>
-    <select id="projectFilter" title="Filter by project">
-      <option value="">All projects</option>
-    </select>
-    <button onclick="search()">Search</button>
-    <button class="secondary" onclick="clearSearch()">Clear</button>
+  <div class="logo">
+    <div class="logo-icon">
+      <svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="3.5" cy="7" r="2.2" fill="white" opacity=".92"/>
+        <circle cx="9" cy="3.5" r="2.2" fill="white" opacity=".92"/>
+        <circle cx="14.5" cy="7" r="2.2" fill="white" opacity=".92"/>
+        <circle cx="6" cy="13" r="2.2" fill="white" opacity=".92"/>
+        <circle cx="12" cy="13" r="2.2" fill="white" opacity=".92"/>
+        <line x1="3.5" y1="7" x2="9" y2="3.5" stroke="white" stroke-width="1.1" opacity=".45"/>
+        <line x1="9" y1="3.5" x2="14.5" y2="7" stroke="white" stroke-width="1.1" opacity=".45"/>
+        <line x1="3.5" y1="7" x2="6" y2="13" stroke="white" stroke-width="1.1" opacity=".45"/>
+        <line x1="14.5" y1="7" x2="12" y2="13" stroke="white" stroke-width="1.1" opacity=".45"/>
+        <line x1="6" y1="13" x2="12" y2="13" stroke="white" stroke-width="1.1" opacity=".45"/>
+        <line x1="9" y1="3.5" x2="6" y2="13" stroke="white" stroke-width="1.1" opacity=".25"/>
+        <line x1="9" y1="3.5" x2="12" y2="13" stroke="white" stroke-width="1.1" opacity=".25"/>
+        <line x1="3.5" y1="7" x2="14.5" y2="7" stroke="white" stroke-width="1.1" opacity=".25"/>
+      </svg>
+    </div>
+    <span class="logo-name">noshy</span>
+    <span class="logo-ver">v0.2.0</span>
   </div>
-  <h2 id="listTitle">Recent memories</h2>
-  <div id="list"><div class="empty">Loading…</div></div>
+  <div class="hgap"></div>
+  <div class="status-pill"><span class="sdot"></span><span>Live</span></div>
+  <select class="hdr-sel" id="projectFilter" aria-label="Filter by project">
+    <option value="">All projects</option>
+  </select>
+  <button class="hdr-btn" id="clusterBtn">
+    <svg viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5">
+      <circle cx="4" cy="4" r="2"/><circle cx="11" cy="4" r="2"/>
+      <circle cx="4" cy="11" r="2"/><circle cx="11" cy="11" r="2"/>
+      <path d="M6 4h3M7.5 6v3M4 6v2M11 6v2M6 11h3"/>
+    </svg>
+    Clusters
+  </button>
+  <button class="hdr-btn ico" id="themeBtn" aria-label="Toggle theme">
+    <svg id="themeIco" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5">
+      <circle cx="7.5" cy="7.5" r="3"/>
+      <path d="M7.5 1v1.5M7.5 12.5V14M1 7.5h1.5M12.5 7.5H14M3.2 3.2l1 1M10.8 10.8l1 1M3.2 11.8l1-1M10.8 4.2l1-1"/>
+    </svg>
+  </button>
+</header>
+
+<!-- MAIN -->
+<main>
+  <!-- Stats -->
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="si"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M8 2C5.2 2 3 4.2 3 7c0 1.9 1 3.6 2.6 4.5V13h4.8v-1.5C12 10.6 13 8.9 13 7c0-2.8-2.2-5-5-5z"/>
+        <path d="M5.5 13h5"/></svg></div>
+      <div class="sv" id="s-mem">—</div><div class="sl">Memories</div>
+    </div>
+    <div class="stat-card">
+      <div class="si"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+        <rect x="2" y="2" width="12" height="12" rx="1.5"/>
+        <path d="M5 6h6M5 9h4"/></svg></div>
+      <div class="sv" id="s-moir">—</div><div class="sl">Memoirs</div>
+    </div>
+    <div class="stat-card">
+      <div class="si"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+        <circle cx="8" cy="8" r="5.5"/><circle cx="8" cy="8" r="1.8"/>
+        <path d="M8 2.5v1.2M8 12.3v1.2M2.5 8h1.2M12.3 8h1.2"/></svg></div>
+      <div class="sv" id="s-con">—</div><div class="sl">Concepts</div>
+    </div>
+    <div class="stat-card">
+      <div class="si"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+        <circle cx="3.5" cy="8" r="2"/><circle cx="12.5" cy="8" r="2"/>
+        <circle cx="8" cy="3.5" r="2"/><circle cx="8" cy="12.5" r="2"/>
+        <path d="M5.4 8h5.2M8 5.4v5.2"/></svg></div>
+      <div class="sv" id="s-edg">—</div><div class="sl">Edges</div>
+    </div>
+    <div class="stat-card">
+      <div class="si"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M2 12 L5 7 L8 9.5 L11 5 L14 8"/>
+        <path d="M2 14h12"/></svg></div>
+      <div class="sv" id="s-wt">—</div><div class="sl">Avg Weight</div>
+    </div>
+  </div>
+
+  <!-- Search -->
+  <div class="search-wrap">
+    <div class="search-field">
+      <svg viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.6">
+        <circle cx="6.5" cy="6.5" r="4.5"/><path d="M10 10l3 3"/></svg>
+      <input id="q" type="text" placeholder="Search memories &amp; memoirs…"
+        autocomplete="off" spellcheck="false">
+    </div>
+    <button class="btn-p" id="searchBtn" onclick="search()">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" style="width:13px;height:13px">
+        <circle cx="6" cy="6" r="4"/><path d="M9 9l3 3"/></svg>
+      Search
+    </button>
+    <button class="btn-g" onclick="clearSearch()">Clear</button>
+  </div>
+
+  <!-- Section header -->
+  <div class="sec-row">
+    <span class="sec-title" id="listTitle">Recent memories</span>
+    <span class="sec-chip" id="secChip" style="display:none"></span>
+  </div>
+
+  <!-- Memory list -->
+  <div id="list" class="mem-list"></div>
+</main>
 </div>
 
-<div class="modal-bg" id="clusterModal" onclick="if(event.target.id==='clusterModal')closeClusters()">
-  <div class="modal">
-    <h3>Near-duplicate clusters</h3>
-    <div id="clusterBody"><div class="empty">Scanning…</div></div>
-    <div class="modal-actions">
-      <button class="secondary" onclick="closeClusters()">Close</button>
-      <button id="consolidateBtn" onclick="runConsolidate()">Consolidate all</button>
+<!-- CLUSTERS MODAL -->
+<div class="moverlay" id="clusterModal"
+  onclick="if(event.target.id==='clusterModal')closeClusters()">
+  <div class="mcard">
+    <div class="mhd">
+      <h3>Near-Duplicate Clusters</h3>
+      <button class="mclose" onclick="closeClusters()" aria-label="Close">&#x2715;</button>
+    </div>
+    <div class="mbod" id="clusterBody">
+      <div class="empty-state"><p>Scanning…</p></div>
+    </div>
+    <div class="mft">
+      <button class="btn-g btn-sm" onclick="closeClusters()">Close</button>
+      <button class="btn-p btn-sm" id="consolidateBtn" onclick="runConsolidate()"
+        style="display:none">Consolidate all</button>
     </div>
   </div>
 </div>
 
+<!-- CONFIRM DIALOG -->
+<div class="cov" id="confirmOv">
+  <div class="ccard">
+    <h4 id="cfTitle">Are you sure?</h4>
+    <p id="cfMsg"></p>
+    <div class="cacts">
+      <button class="btn-g btn-sm" id="cfNo">Cancel</button>
+      <button class="btn-d btn-sm" id="cfYes">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- TOASTS -->
+<div id="tc"></div>
+
 <script>
-const $ = id => document.getElementById(id);
-const esc = s => (s==null?'':String(s)).replace(/[&<>"']/g, c =>
+const $=id=>document.getElementById(id);
+const esc=s=>(s==null?'':String(s)).replace(/[&<>"']/g,c=>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
-// ──── theme ────
+/* ── theme ─────────────────────────────────────────── */
+const sunSVG=`<svg viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5">
+  <circle cx="7.5" cy="7.5" r="3"/>
+  <path d="M7.5 1v1.5M7.5 12.5V14M1 7.5h1.5M12.5 7.5H14M3.2 3.2l1 1M10.8 10.8l1 1M3.2 11.8l1-1M10.8 4.2l1-1"/>
+</svg>`;
+const moonSVG=`<svg viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5">
+  <path d="M11.5 10A6 6 0 015 3.5a6 6 0 100 9 6 6 0 006.5-2.5z"/>
+</svg>`;
 function applyTheme(t){
-  document.documentElement.setAttribute('data-theme', t);
-  $('themeBtn').textContent = (t==='dark' ? '☀️' : '🌙');
-  try { localStorage.setItem('noshy.theme', t); } catch(_){}
+  document.documentElement.setAttribute('data-theme',t);
+  $('themeBtn').innerHTML=t==='dark'?sunSVG:moonSVG;
+  try{localStorage.setItem('noshy.theme',t);}catch(_){}
 }
-(function initTheme(){
-  let t;
-  try { t = localStorage.getItem('noshy.theme'); } catch(_){}
-  if(!t){
-    t = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
-  }
+(function(){
+  let t;try{t=localStorage.getItem('noshy.theme');}catch(_){}
+  if(!t)t=window.matchMedia('(prefers-color-scheme:light)').matches?'light':'dark';
   applyTheme(t);
 })();
-$('themeBtn').addEventListener('click', () => {
-  applyTheme(document.documentElement.getAttribute('data-theme')==='dark' ? 'light' : 'dark');
+$('themeBtn').addEventListener('click',()=>{
+  applyTheme(document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark');
 });
 
-// ──── data loaders ────
+/* ── toasts ─────────────────────────────────────────── */
+function toast(msg,type='ok',ms=3200){
+  const iko=type==='ok'
+    ?`<svg class="tico" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 7l3.5 3.5L12 3.5"/></svg>`
+    :`<svg class="tico" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 3l8 8M11 3l-8 8"/></svg>`;
+  const el=document.createElement('div');
+  el.className=`toast ${type}`;
+  el.innerHTML=iko+`<span>${esc(msg)}</span>`;
+  $('tc').prepend(el);
+  setTimeout(()=>{el.style.cssText='opacity:0;transform:translateX(12px);transition:all .28s ease;';
+    setTimeout(()=>el.remove(),290);},ms);
+}
+
+/* ── confirm ─────────────────────────────────────────── */
+function confirm2(title,msg){
+  return new Promise(res=>{
+    $('cfTitle').textContent=title;$('cfMsg').textContent=msg;
+    $('confirmOv').classList.add('open');
+    const no=$('cfNo'),yes=$('cfYes');
+    function done(v){
+      $('confirmOv').classList.remove('open');
+      no.removeEventListener('click',onNo);yes.removeEventListener('click',onYes);
+      res(v);
+    }
+    const onNo=()=>done(false),onYes=()=>done(true);
+    no.addEventListener('click',onNo);yes.addEventListener('click',onYes);
+  });
+}
+
+/* ── stats ─────────────────────────────────────────── */
+function animN(el,to){
+  const from=parseInt(el.textContent)||0,diff=to-from;
+  if(!diff){el.textContent=to;return;}
+  const dur=380,t0=performance.now();
+  const tick=now=>{
+    const p=Math.min(1,(now-t0)/dur);
+    el.textContent=Math.round(from+diff*(p<.5?2*p*p:-1+(4-2*p)*p));
+    if(p<1)requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
 async function loadStats(){
-  try {
-    const s = await (await fetch('/stats')).json();
-    const cards = [
-      ['memory_count','Memories'],['memoir_count','Memoirs'],
-      ['concept_count','Concepts'],['edge_count','Edges']
-    ];
-    $('stats').innerHTML = cards.map(([k,l]) =>
-      `<div class="stat"><div class="n">${s[k]??0}</div><div class="l">${l}</div></div>`
-    ).join('') +
-      `<div class="stat"><div class="n">${(s.avg_weight??0).toFixed(2)}</div>`+
-      `<div class="l">Avg weight</div></div>`;
-  } catch(e){ console.error(e); }
+  try{
+    const s=await(await fetch('/stats')).json();
+    animN($('s-mem'),s.memory_count||0);animN($('s-moir'),s.memoir_count||0);
+    animN($('s-con'),s.concept_count||0);animN($('s-edg'),s.edge_count||0);
+    $('s-wt').textContent=(s.avg_weight||0).toFixed(2);
+  }catch(e){console.error('stats',e);}
 }
 
+/* ── projects ─────────────────────────────────────────── */
 async function loadProjects(){
-  try {
-    const r = await (await fetch('/projects')).json();
-    const sel = $('projectFilter');
-    const current = sel.value;
-    const opts = ['<option value="">All projects</option>'].concat(
-      (r.projects||[]).map(p =>
-        `<option value="${esc(p.project)}">${esc(p.project)} (${p.memory_count})</option>`));
-    sel.innerHTML = opts.join('');
-    sel.value = current;
-  } catch(e){ /* dashboard still works without it */ }
+  try{
+    const r=await(await fetch('/projects')).json();
+    const sel=$('projectFilter'),cur=sel.value;
+    sel.innerHTML='<option value="">All projects</option>'+
+      (r.projects||[]).map(p=>
+        `<option value="${esc(p.project)}">${esc(p.project)} (${p.memory_count})</option>`).join('');
+    if(cur)sel.value=cur;
+  }catch(_){}
 }
 
+/* ── render ─────────────────────────────────────────── */
+function impCls(imp){
+  const i=(imp||'medium').toLowerCase();
+  return {critical:'ic',high:'ih',medium:'im',low:'il',memoir:'io'}[i]||'im';
+}
 function render(items){
-  const list = $('list');
+  $('secChip').style.display=items.length?'':'none';
+  if(items.length)$('secChip').textContent=items.length+(items.length===1?' result':' results');
   if(!items.length){
-    list.innerHTML = '<div class="empty">Nothing here yet.</div>';
+    $('list').innerHTML=`<div class="empty-state">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <circle cx="11" cy="11" r="7"/><path d="M16.5 16.5l4 4"/>
+        <path d="M8 11h6M11 8v6"/>
+      </svg>
+      <p>No memories found</p>
+      <small>Try a different query or store some memories first.</small>
+    </div>`;
     return;
   }
-  list.innerHTML = items.map(m => {
-    const imp = (m._kind==='memoir' || m.importance==='memoir') ? 'memoir'
-      : (m.importance||'medium').toLowerCase();
-    const when = (m.created_at||'').slice(0,10);
-    const proj = (m.project && m.project!=='default') ? ' · '+esc(m.project) : '';
-    const w = (m.weight!=null) ? ' · w'+Number(m.weight).toFixed(2) : '';
-    const topic = m.topic || m.title || '';
-    const summary = m.summary || m.content || '';
-    const delBtn = m.id
-      ? `<button class="del" title="Delete this memory" data-id="${esc(m.id)}" data-topic="${esc(topic)}">×</button>`
-      : '';
-    return `<div class="mem"><span class="badge b-${imp}">${imp}</span>`+
-      `<div class="body"><div class="topic">${esc(topic)}</div>`+
-      `<div class="summary">${esc(summary)}</div>`+
-      `<div class="meta">${esc(when)}${proj}${w}</div></div>${delBtn}</div>`;
+  $('list').innerHTML=items.map(m=>{
+    const imp=(m._kind==='memoir'||m.importance==='memoir')?'memoir':(m.importance||'medium').toLowerCase();
+    const when=(m.created_at||'').slice(0,10);
+    const proj=m.project&&m.project!=='default'?m.project:'';
+    const w=m.weight!=null?Number(m.weight).toFixed(2):'';
+    const topic=m.topic||m.title||'(untitled)';
+    const summary=m.summary||m.content||'';
+    const meta=[];
+    if(when)meta.push(`<svg viewBox="0 0 11 11" fill="none" stroke="currentColor" stroke-width="1.4" style="width:9px;height:9px"><rect x="1" y="1.5" width="9" height="8.5" rx="1.2"/><path d="M1 4.5h9M3.5.5v2M7.5.5v2"/></svg> ${esc(when)}`);
+    if(proj)meta.push(`<svg viewBox="0 0 11 11" fill="none" stroke="currentColor" stroke-width="1.4" style="width:9px;height:9px"><path d="M1.5 7.5V4L5.5 2 9.5 4v3.5L5.5 9z"/></svg> ${esc(proj)}`);
+    if(w)meta.push(`w ${w}`);
+    if(m.access_count)meta.push(`${m.access_count}×`);
+    const del=m.id
+      ?`<button class="mdel" data-id="${esc(m.id)}" data-topic="${esc(topic)}" aria-label="Delete">
+          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M2 3.5h10M5 3.5V2.5h4v1M5.5 6v4.5M8.5 6v4.5M3.5 3.5l.5 8h6l.5-8"/>
+          </svg></button>`:'';
+    return `<div class="mem ${impCls(imp)}">
+      <span class="badge b-${imp}">${imp}</span>
+      <div class="mbody">
+        <div class="mtopic">${esc(topic)}</div>
+        <div class="msum">${esc(summary)}</div>
+        ${meta.length?`<div class="mmeta">${meta.map(x=>`<span>${x}</span>`).join('')}</div>`:''}
+      </div>${del}</div>`;
   }).join('');
-  list.querySelectorAll('.del').forEach(b => b.addEventListener('click', onDelete));
+  $('list').querySelectorAll('.mdel').forEach(b=>b.addEventListener('click',onDelete));
 }
 
+function showSkel(){
+  $('list').innerHTML=[1,2,3,4].map(()=>`
+    <div class="skel">
+      <div class="sl-line" style="width:55%;height:13px"></div>
+      <div class="sl-line" style="width:88%;margin-top:10px"></div>
+      <div class="sl-line" style="width:36%;margin-top:8px;height:9px;opacity:.5"></div>
+    </div>`).join('');
+  $('secChip').style.display='none';
+}
+
+/* ── delete ─────────────────────────────────────────── */
 async function onDelete(e){
-  const btn = e.currentTarget;
-  const id = btn.dataset.id;
-  const topic = btn.dataset.topic || '(this memory)';
-  if(!confirm(`Delete "${topic}"?\nThis cannot be undone.`)) return;
-  try {
-    const r = await fetch('/memories/' + encodeURIComponent(id), {method:'DELETE'});
-    if(!r.ok){ alert('Delete failed (' + r.status + ')'); return; }
-    btn.closest('.mem').remove();
-    loadStats();
-  } catch(err){ alert('Delete failed: ' + err); }
+  const btn=e.currentTarget;
+  const id=btn.dataset.id,topic=btn.dataset.topic||'this memory';
+  const ok=await confirm2(`Delete memory?`,`"${topic}" will be permanently removed.`);
+  if(!ok)return;
+  try{
+    const r=await fetch('/memories/'+encodeURIComponent(id),{method:'DELETE'});
+    if(!r.ok){toast('Delete failed ('+r.status+')','err');return;}
+    const row=btn.closest('.mem');
+    row.style.cssText='opacity:0;transform:translateX(-10px);transition:all .2s ease;';
+    setTimeout(()=>{row.remove();loadStats();},200);
+    toast('Memory deleted');
+  }catch(err){toast('Delete failed: '+err,'err');}
 }
 
-function urlParams(extra){
-  const project = $('projectFilter').value;
-  const u = new URLSearchParams(extra || {});
-  if(project) u.set('project', project);
-  u.set('limit', '50');
-  return u.toString();
+/* ── search / load ─────────────────────────────────── */
+function qp(extra){
+  const proj=$('projectFilter').value;
+  const u=new URLSearchParams(extra||{});
+  if(proj)u.set('project',proj);u.set('limit','50');return u.toString();
 }
-
 async function loadRecent(){
-  $('listTitle').textContent = 'Recent memories' +
-    ($('projectFilter').value ? ' · ' + $('projectFilter').value : '');
-  try {
-    const r = await (await fetch('/memories?' + urlParams())).json();
-    render(r.memories || []);
-  } catch(e){
-    $('list').innerHTML = '<div class="empty">Failed to load.</div>';
-  }
+  $('listTitle').textContent='Recent memories'+($('projectFilter').value?' · '+$('projectFilter').value:'');
+  showSkel();
+  try{const r=await(await fetch('/memories?'+qp())).json();render(r.memories||[]);}
+  catch(_){$('list').innerHTML='<div class="empty-state"><p>Failed to load</p></div>';}
 }
-
 async function search(){
-  const q = $('q').value.trim();
-  if(!q){ loadRecent(); return; }
-  $('listTitle').textContent = 'Results for "' + q + '"' +
-    ($('projectFilter').value ? ' in ' + $('projectFilter').value : '');
-  try {
-    const r = await (await fetch('/memories?' + urlParams({q}))).json();
-    render(r.memories || []);
-  } catch(e){
-    $('list').innerHTML = '<div class="empty">Search failed.</div>';
-  }
+  const q=$('q').value.trim();
+  if(!q){loadRecent();return;}
+  $('listTitle').textContent='Results for "'+q+'"'+($('projectFilter').value?' in '+$('projectFilter').value:'');
+  showSkel();
+  try{const r=await(await fetch('/memories?'+qp({q}))).json();render(r.memories||[]);}
+  catch(_){$('list').innerHTML='<div class="empty-state"><p>Search failed</p></div>';}
 }
+function clearSearch(){$('q').value='';$('projectFilter').value='';loadRecent();}
 
-function clearSearch(){ $('q').value = ''; $('projectFilter').value = ''; loadRecent(); }
-
-// ──── cluster modal ────
+/* ── clusters ─────────────────────────────────────── */
 async function openClusters(){
   $('clusterModal').classList.add('open');
-  $('clusterBody').innerHTML = '<div class="empty">Scanning for near-duplicates…</div>';
-  try {
-    const r = await (await fetch('/clusters?threshold=0.85' +
-      ($('projectFilter').value ? '&project=' + encodeURIComponent($('projectFilter').value) : ''))).json();
-    const clusters = r.clusters || [];
+  $('clusterBody').innerHTML='<div class="empty-state"><p>Scanning for near-duplicates…</p></div>';
+  $('consolidateBtn').style.display='none';
+  try{
+    const proj=$('projectFilter').value;
+    const r=await(await fetch('/clusters?threshold=0.85'+(proj?'&project='+encodeURIComponent(proj):'')+'')).json();
+    const clusters=r.clusters||[];
     if(!clusters.length){
-      $('clusterBody').innerHTML = '<div class="empty">No near-duplicates detected. Your store is tidy.</div>';
-      $('consolidateBtn').style.display = 'none';
+      $('clusterBody').innerHTML=`<div class="empty-state">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 13l4 4L19 7"/></svg>
+        <p>No near-duplicates found</p><small>Your memory store is clean.</small></div>`;
       return;
     }
-    $('consolidateBtn').style.display = '';
-    $('clusterBody').innerHTML = clusters.map((c, i) =>
-      `<div class="cluster">
-        <div class="cluster-head">Cluster ${i+1} <span style="color:var(--muted);font-weight:400">${c.length} memories</span></div>
-        ${c.slice(0,5).map(m =>
-          `<div class="cluster-item"><strong>${esc(m.topic||'')}</strong>: ${esc((m.summary||'').slice(0,160))}</div>`
-        ).join('')}
-        ${c.length>5 ? `<div class="cluster-item" style="font-style:italic">…and ${c.length-5} more</div>` : ''}
+    $('consolidateBtn').style.display='';
+    $('clusterBody').innerHTML=clusters.map((c,i)=>`
+      <div class="clu-card">
+        <div class="clu-head">
+          <span class="clu-num">${i+1}</span>
+          <span class="clu-ttl">Cluster ${i+1}</span>
+          <span class="clu-cnt">${c.length} memories</span>
+        </div>
+        ${c.slice(0,5).map(m=>`
+          <div class="clu-item">
+            <strong>${esc(m.topic||'')}</strong>
+            <span>: ${esc((m.summary||'').slice(0,160))}</span>
+          </div>`).join('')}
+        ${c.length>5?`<div class="clu-item" style="font-style:italic;color:var(--muted)">&#8230;and ${c.length-5} more</div>`:''}
       </div>`).join('');
-  } catch(e){
-    $('clusterBody').innerHTML = '<div class="empty">Failed to load clusters.</div>';
-  }
+  }catch(e){$('clusterBody').innerHTML='<div class="empty-state"><p>Failed to load clusters</p></div>';}
 }
-function closeClusters(){ $('clusterModal').classList.remove('open'); }
+function closeClusters(){$('clusterModal').classList.remove('open');}
 async function runConsolidate(){
-  if(!confirm('Merge every detected cluster into one survivor each?\nDuplicates will be deleted.')) return;
-  const btn = $('consolidateBtn');
-  btn.disabled = true; btn.textContent = 'Consolidating…';
-  try {
-    const r = await (await fetch('/tools/call', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
+  const ok=await confirm2('Consolidate all clusters?',
+    'Each cluster of near-duplicates will be merged into one. Duplicates will be permanently deleted.');
+  if(!ok)return;
+  const btn=$('consolidateBtn');btn.disabled=true;btn.textContent='Consolidating…';
+  try{
+    const r=await(await fetch('/tools/call',{
+      method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({name:'noshy_consolidate_clusters',
-        arguments:{threshold:0.85,
-          project:$('projectFilter').value || undefined}})
+        arguments:{threshold:0.85,project:$('projectFilter').value||undefined}})
     })).json();
-    alert((r.content && r.content[0] && r.content[0].text) || 'Done.');
-    closeClusters();
-    loadStats(); loadProjects(); loadRecent();
-  } catch(e){ alert('Failed: ' + e); }
-  finally { btn.disabled = false; btn.textContent = 'Consolidate all'; }
+    toast((r.content&&r.content[0]&&r.content[0].text)||'Done.');
+    closeClusters();loadStats();loadProjects();loadRecent();
+  }catch(e){toast('Consolidate failed: '+e,'err');}
+  finally{btn.disabled=false;btn.textContent='Consolidate all';}
 }
 
-// ──── wiring ────
-$('q').addEventListener('keydown', e => { if(e.key==='Enter') search(); });
-$('projectFilter').addEventListener('change', () => $('q').value ? search() : loadRecent());
-$('clusterBtn').addEventListener('click', openClusters);
+/* ── keyboard ─────────────────────────────────────── */
+$('q').addEventListener('keydown',e=>{
+  if(e.key==='Enter')search();
+  if(e.key==='Escape')clearSearch();
+});
+$('projectFilter').addEventListener('change',()=>$('q').value?search():loadRecent());
+$('clusterBtn').addEventListener('click',openClusters);
 
-loadStats(); loadProjects(); loadRecent();
-setInterval(loadStats, 15000);
-setInterval(loadProjects, 30000);
+/* ── boot ─────────────────────────────────────────── */
+loadStats();loadProjects();loadRecent();
+setInterval(loadStats,15000);setInterval(loadProjects,30000);
 </script>
 </body>
 </html>"""
@@ -899,7 +1284,7 @@ def run_http(host: str = "127.0.0.1", port: int = 8720, db_path: str = None):
     auth_token = os.environ.get("NOSHY_HTTP_TOKEN", "")
     if auth_token:
         log.info("HTTP auth enabled (Bearer token required)")
-    public_paths = {"/health"}
+    public_paths = {"/health", "/", "/dashboard"}
 
     def _is_authorized(handler) -> bool:
         if not auth_token:
@@ -1003,8 +1388,8 @@ def run_http(host: str = "127.0.0.1", port: int = 8720, db_path: str = None):
                 path = parsed.path
                 qs = parse_qs(parsed.query)
 
-                # Only /health is public; dashboard and all API routes require auth when configured
-                if path != "/health" and not self._require_auth():
+                # /health and dashboard HTML are public; API routes require auth when configured
+                if path not in public_paths and not self._require_auth():
                     return
 
                 if path in ("/", "/dashboard"):
@@ -1075,8 +1460,10 @@ def run_http(host: str = "127.0.0.1", port: int = 8720, db_path: str = None):
         if store:
             store.shutdown()
 
-    signal.signal(signal.SIGTERM, _graceful_shutdown)
-    signal.signal(signal.SIGINT, _graceful_shutdown)
+    import threading as _threading
+    if _threading.current_thread() is _threading.main_thread():
+        signal.signal(signal.SIGTERM, _graceful_shutdown)
+        signal.signal(signal.SIGINT, _graceful_shutdown)
 
     try:
         server.serve_forever()
