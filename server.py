@@ -241,7 +241,7 @@ def handle_initialize(params: Dict) -> Dict:
     return {
         "protocolVersion": "2024-11-05",
         "capabilities": {"tools": {}},
-        "serverInfo": {"name": "noshy", "version": "0.2.0"},
+        "serverInfo": {"name": "noshy", "version": "0.2.1"},
     }
 
 
