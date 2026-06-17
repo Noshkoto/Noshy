@@ -89,6 +89,20 @@ MCP_TOOLS = [
         },
     },
     {
+        "name": "noshy_stream_extract",
+        "description": "Extract memories from a LONG transcript incrementally. Use this when the transcript is much longer than what a single LLM call can process (e.g., a multi-hour session log). Splits the input into overlapping chunks, runs extraction on each, and stores results as they're produced. Reports per-chunk progress.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "transcript": {"type": "string", "description": "Full transcript text (can be very long)"},
+                "project": {"type": "string", "default": "default"},
+                "chunk_chars": {"type": "integer", "default": 4000, "description": "Approx characters per chunk"},
+                "max_memories_per_chunk": {"type": "integer", "default": 4},
+            },
+            "required": ["transcript"],
+        },
+    },
+    {
         "name": "noshy_consolidate",
         "description": "Merge related memories on a topic into one consolidated entry.",
         "inputSchema": {
@@ -227,12 +241,43 @@ def handle_initialize(params: Dict) -> Dict:
     return {
         "protocolVersion": "2024-11-05",
         "capabilities": {"tools": {}},
-        "serverInfo": {"name": "noshy", "version": "0.1.0"},
+        "serverInfo": {"name": "noshy", "version": "0.2.0"},
     }
 
 
 def handle_tools_list(params: Dict = None) -> Dict:
     return {"tools": MCP_TOOLS}
+
+
+def _split_transcript(text: str, target: int = 4000) -> List[str]:
+    """Split a long transcript into roughly target-sized chunks, preferring
+    paragraph boundaries so each chunk is self-contained.
+    """
+    if len(text) <= target:
+        return [text]
+    chunks: List[str] = []
+    paragraphs = text.split("\n\n")
+    buf: List[str] = []
+    size = 0
+    for p in paragraphs:
+        plen = len(p) + 2  # include separator
+        if size + plen > target and buf:
+            chunks.append("\n\n".join(buf))
+            buf, size = [p], plen
+        else:
+            buf.append(p)
+            size += plen
+    if buf:
+        chunks.append("\n\n".join(buf))
+    # Anything still oversized (one huge paragraph) — hard-slice
+    out: List[str] = []
+    for c in chunks:
+        if len(c) <= target * 2:
+            out.append(c)
+        else:
+            for i in range(0, len(c), target):
+                out.append(c[i:i + target])
+    return out
 
 
 def handle_tools_call(params: Dict) -> Dict:
@@ -318,6 +363,42 @@ def handle_tools_call(params: Dict) -> Dict:
                     count += 1
 
             return {"content": [{"type": "text", "text": f"Extracted and stored {count} memories."}]}
+
+        elif name == "noshy_stream_extract":
+            from extractor import stream_extract
+            transcript = args["transcript"]
+            project = args.get("project", "default")
+            chunk_chars = max(500, int(args.get("chunk_chars", 4000)))
+            mpc = max(1, int(args.get("max_memories_per_chunk", 4)))
+
+            # Split into roughly chunk_chars-sized pieces, preferring paragraph breaks
+            chunks = _split_transcript(transcript, chunk_chars)
+            total_stored = 0
+            chunk_count = 0
+            for facts in stream_extract(
+                chunks,
+                max_memories_per_chunk=mpc,
+                chunk_overlap=min(400, chunk_chars // 4),
+            ):
+                chunk_count += 1
+                for f in facts:
+                    if f.get("_type") == "relationship":
+                        store.link_memories(f["source_id"], f["target_id"],
+                                            f.get("relation", "related"))
+                    elif f.get("_type") == "concept":
+                        pass
+                    else:
+                        store.store_memory(
+                            topic=f["topic"], summary=f["summary"],
+                            keywords=f.get("keywords"),
+                            importance=f.get("importance", "medium"),
+                            source="stream-extract",
+                            project=project,
+                        )
+                        total_stored += 1
+            return {"content": [{"type": "text",
+                "text": f"Streamed {len(chunks)} chunks, {chunk_count} produced facts, "
+                        f"stored {total_stored} memories total."}]}
 
         elif name == "noshy_consolidate":
             count = store.consolidate(
@@ -502,41 +583,59 @@ def run_stdio(db_path: str = None):
 
 # ──────────── Web Dashboard ────────────
 
-DASHBOARD_HTML = """<!doctype html>
+DASHBOARD_HTML = r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Noshy — Memory Dashboard</title>
 <style>
-  :root {
+  :root, [data-theme="dark"] {
     --bg:#0e1117; --panel:#161b22; --border:#272e3a; --text:#e6edf3;
     --muted:#8b949e; --accent:#5b8def; --crit:#f85149; --high:#d29922;
-    --med:#3fb950; --low:#6e7681;
+    --med:#3fb950; --low:#6e7681; --danger:#f85149; --overlay:rgba(0,0,0,.6);
+  }
+  [data-theme="light"] {
+    --bg:#f6f8fa; --panel:#ffffff; --border:#d8dde3; --text:#1f2328;
+    --muted:#57606a; --accent:#0969da; --crit:#cf222e; --high:#9a6700;
+    --med:#1a7f37; --low:#6e7781; --danger:#cf222e; --overlay:rgba(0,0,0,.35);
   }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--text);
-    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    transition:background .15s, color .15s; }
   header { padding:20px 28px; border-bottom:1px solid var(--border);
     display:flex; align-items:center; gap:14px; }
   header h1 { margin:0; font-size:20px; font-weight:650; }
   header .dot { width:10px; height:10px; border-radius:50%; background:var(--med); }
+  header .spacer { flex:1; }
+  .icon-btn { background:transparent; border:1px solid var(--border); color:var(--text);
+    border-radius:8px; padding:6px 10px; cursor:pointer; font-size:13px; }
+  .icon-btn:hover { background:var(--panel); }
   .wrap { max-width:1100px; margin:0 auto; padding:24px 28px; }
   .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
-    gap:14px; margin-bottom:24px; }
+    gap:14px; margin-bottom:18px; }
   .stat { background:var(--panel); border:1px solid var(--border); border-radius:10px;
     padding:16px 18px; }
   .stat .n { font-size:26px; font-weight:700; }
   .stat .l { color:var(--muted); font-size:12px; text-transform:uppercase;
     letter-spacing:.04em; margin-top:4px; }
-  .searchbar { display:flex; gap:10px; margin-bottom:18px; }
-  .searchbar input { flex:1; background:var(--panel); border:1px solid var(--border);
-    border-radius:8px; padding:10px 14px; color:var(--text); font-size:14px; }
-  .searchbar button { background:var(--accent); border:0; border-radius:8px;
-    color:#fff; padding:0 18px; font-weight:600; cursor:pointer; }
-  .searchbar button:hover { filter:brightness(1.08); }
+  .controls { display:flex; gap:10px; margin-bottom:14px; flex-wrap:wrap; align-items:center; }
+  .controls input, .controls select { background:var(--panel); border:1px solid var(--border);
+    border-radius:8px; padding:10px 12px; color:var(--text); font-size:14px;
+    font-family:inherit; }
+  .controls input { flex:1; min-width:240px; }
+  .controls button { background:var(--accent); border:0; border-radius:8px;
+    color:#fff; padding:0 16px; font-weight:600; cursor:pointer; font-size:14px; }
+  .controls button.secondary { background:transparent; color:var(--text);
+    border:1px solid var(--border); }
+  .controls button:hover { filter:brightness(1.08); }
+  .controls button.secondary:hover { background:var(--panel); }
   .mem { background:var(--panel); border:1px solid var(--border); border-radius:10px;
-    padding:14px 16px; margin-bottom:10px; display:flex; gap:14px; align-items:flex-start; }
+    padding:14px 16px; margin-bottom:10px; display:flex; gap:14px; align-items:flex-start;
+    position:relative; transition:border-color .15s; }
+  .mem:hover { border-color:var(--accent); }
+  .mem:hover .del { opacity:1; }
   .badge { flex:none; font-size:10px; font-weight:700; padding:3px 8px; border-radius:5px;
     text-transform:uppercase; letter-spacing:.03em; margin-top:2px; }
   .b-critical{background:rgba(248,81,73,.16);color:var(--crit);}
@@ -548,26 +647,87 @@ DASHBOARD_HTML = """<!doctype html>
   .mem .topic { font-weight:600; }
   .mem .summary { color:var(--muted); margin-top:2px; word-wrap:break-word; }
   .mem .meta { color:var(--low); font-size:11px; margin-top:6px; }
+  .del { opacity:0; background:transparent; border:0; color:var(--danger);
+    cursor:pointer; font-size:18px; line-height:1; padding:4px 6px;
+    transition:opacity .15s; }
+  .del:hover { background:rgba(248,81,73,.12); border-radius:6px; }
   .empty { color:var(--muted); text-align:center; padding:40px; }
   h2 { font-size:13px; text-transform:uppercase; letter-spacing:.05em;
     color:var(--muted); margin:24px 0 12px; }
+  /* Modal */
+  .modal-bg { position:fixed; inset:0; background:var(--overlay); display:none;
+    align-items:center; justify-content:center; padding:24px; z-index:100; }
+  .modal-bg.open { display:flex; }
+  .modal { background:var(--bg); border:1px solid var(--border); border-radius:12px;
+    max-width:720px; width:100%; max-height:80vh; overflow:auto; padding:24px; }
+  .modal h3 { margin:0 0 16px; }
+  .cluster { border:1px solid var(--border); border-radius:8px; padding:12px;
+    margin-bottom:10px; }
+  .cluster-head { display:flex; justify-content:space-between; align-items:center;
+    margin-bottom:8px; font-weight:600; }
+  .cluster-item { color:var(--muted); font-size:12px; padding:4px 0;
+    border-top:1px dashed var(--border); }
+  .cluster-item:first-of-type { border-top:0; }
+  .modal-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:16px; }
 </style>
 </head>
 <body>
-<header><span class="dot"></span><h1>Noshy</h1>
-  <span style="color:var(--muted)">persistent memory dashboard</span></header>
+<header>
+  <span class="dot"></span><h1>Noshy</h1>
+  <span style="color:var(--muted)">persistent memory dashboard</span>
+  <span class="spacer"></span>
+  <button class="icon-btn" id="clusterBtn" title="Find clusters of near-duplicate memories">Clusters</button>
+  <button class="icon-btn" id="themeBtn" title="Toggle theme">🌙</button>
+</header>
 <div class="wrap">
   <div class="stats" id="stats"></div>
-  <div class="searchbar">
+  <div class="controls">
     <input id="q" placeholder="Search memories &amp; memoirs…" autofocus>
+    <select id="projectFilter" title="Filter by project">
+      <option value="">All projects</option>
+    </select>
     <button onclick="search()">Search</button>
+    <button class="secondary" onclick="clearSearch()">Clear</button>
   </div>
   <h2 id="listTitle">Recent memories</h2>
   <div id="list"><div class="empty">Loading…</div></div>
 </div>
+
+<div class="modal-bg" id="clusterModal" onclick="if(event.target.id==='clusterModal')closeClusters()">
+  <div class="modal">
+    <h3>Near-duplicate clusters</h3>
+    <div id="clusterBody"><div class="empty">Scanning…</div></div>
+    <div class="modal-actions">
+      <button class="secondary" onclick="closeClusters()">Close</button>
+      <button id="consolidateBtn" onclick="runConsolidate()">Consolidate all</button>
+    </div>
+  </div>
+</div>
+
 <script>
-const esc = s => (s||"").replace(/[&<>"]/g, c =>
-  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const $ = id => document.getElementById(id);
+const esc = s => (s==null?'':String(s)).replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+// ──── theme ────
+function applyTheme(t){
+  document.documentElement.setAttribute('data-theme', t);
+  $('themeBtn').textContent = (t==='dark' ? '☀️' : '🌙');
+  try { localStorage.setItem('noshy.theme', t); } catch(_){}
+}
+(function initTheme(){
+  let t;
+  try { t = localStorage.getItem('noshy.theme'); } catch(_){}
+  if(!t){
+    t = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  }
+  applyTheme(t);
+})();
+$('themeBtn').addEventListener('click', () => {
+  applyTheme(document.documentElement.getAttribute('data-theme')==='dark' ? 'light' : 'dark');
+});
+
+// ──── data loaders ────
 async function loadStats(){
   try {
     const s = await (await fetch('/stats')).json();
@@ -575,63 +735,153 @@ async function loadStats(){
       ['memory_count','Memories'],['memoir_count','Memoirs'],
       ['concept_count','Concepts'],['edge_count','Edges']
     ];
-    document.getElementById('stats').innerHTML = cards.map(([k,l]) =>
+    $('stats').innerHTML = cards.map(([k,l]) =>
       `<div class="stat"><div class="n">${s[k]??0}</div><div class="l">${l}</div></div>`
     ).join('') +
       `<div class="stat"><div class="n">${(s.avg_weight??0).toFixed(2)}</div>`+
       `<div class="l">Avg weight</div></div>`;
   } catch(e){ console.error(e); }
 }
-function render(items, kindFromBadge){
-  const list = document.getElementById('list');
-  if(!items.length){ list.innerHTML='<div class="empty">Nothing here yet.</div>'; return; }
+
+async function loadProjects(){
+  try {
+    const r = await (await fetch('/projects')).json();
+    const sel = $('projectFilter');
+    const current = sel.value;
+    const opts = ['<option value="">All projects</option>'].concat(
+      (r.projects||[]).map(p =>
+        `<option value="${esc(p.project)}">${esc(p.project)} (${p.memory_count})</option>`));
+    sel.innerHTML = opts.join('');
+    sel.value = current;
+  } catch(e){ /* dashboard still works without it */ }
+}
+
+function render(items){
+  const list = $('list');
+  if(!items.length){
+    list.innerHTML = '<div class="empty">Nothing here yet.</div>';
+    return;
+  }
   list.innerHTML = items.map(m => {
-    const imp = (m._kind==='memoir') ? 'memoir'
+    const imp = (m._kind==='memoir' || m.importance==='memoir') ? 'memoir'
       : (m.importance||'medium').toLowerCase();
     const when = (m.created_at||'').slice(0,10);
     const proj = (m.project && m.project!=='default') ? ' · '+esc(m.project) : '';
     const w = (m.weight!=null) ? ' · w'+Number(m.weight).toFixed(2) : '';
+    const topic = m.topic || m.title || '';
+    const summary = m.summary || m.content || '';
+    const delBtn = m.id
+      ? `<button class="del" title="Delete this memory" data-id="${esc(m.id)}" data-topic="${esc(topic)}">×</button>`
+      : '';
     return `<div class="mem"><span class="badge b-${imp}">${imp}</span>`+
-      `<div class="body"><div class="topic">${esc(m.topic||m.title||'')}</div>`+
-      `<div class="summary">${esc(m.summary||m.content||'')}</div>`+
-      `<div class="meta">${when}${proj}${w}</div></div></div>`;
+      `<div class="body"><div class="topic">${esc(topic)}</div>`+
+      `<div class="summary">${esc(summary)}</div>`+
+      `<div class="meta">${esc(when)}${proj}${w}</div></div>${delBtn}</div>`;
   }).join('');
+  list.querySelectorAll('.del').forEach(b => b.addEventListener('click', onDelete));
 }
+
+async function onDelete(e){
+  const btn = e.currentTarget;
+  const id = btn.dataset.id;
+  const topic = btn.dataset.topic || '(this memory)';
+  if(!confirm(`Delete "${topic}"?\nThis cannot be undone.`)) return;
+  try {
+    const r = await fetch('/memories/' + encodeURIComponent(id), {method:'DELETE'});
+    if(!r.ok){ alert('Delete failed (' + r.status + ')'); return; }
+    btn.closest('.mem').remove();
+    loadStats();
+  } catch(err){ alert('Delete failed: ' + err); }
+}
+
+function urlParams(extra){
+  const project = $('projectFilter').value;
+  const u = new URLSearchParams(extra || {});
+  if(project) u.set('project', project);
+  u.set('limit', '50');
+  return u.toString();
+}
+
 async function loadRecent(){
-  document.getElementById('listTitle').textContent='Recent memories';
+  $('listTitle').textContent = 'Recent memories' +
+    ($('projectFilter').value ? ' · ' + $('projectFilter').value : '');
   try {
-    const r = await (await fetch('/memories?limit=25')).json();
-    render(r.memories||[]);
-  } catch(e){ document.getElementById('list').innerHTML=
-    '<div class="empty">Failed to load.</div>'; }
+    const r = await (await fetch('/memories?' + urlParams())).json();
+    render(r.memories || []);
+  } catch(e){
+    $('list').innerHTML = '<div class="empty">Failed to load.</div>';
+  }
 }
+
 async function search(){
-  const q = document.getElementById('q').value.trim();
+  const q = $('q').value.trim();
   if(!q){ loadRecent(); return; }
-  document.getElementById('listTitle').textContent='Results for "'+q+'"';
+  $('listTitle').textContent = 'Results for "' + q + '"' +
+    ($('projectFilter').value ? ' in ' + $('projectFilter').value : '');
   try {
-    const res = await (await fetch('/tools/call',{method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({name:'noshy_recall',
-        arguments:{query:q, mode:'hybrid', limit:25}})})).json();
-    // recall returns formatted text; re-query /memories filtered client-side is
-    // not ideal, so parse the text blocks back into cards.
-    const text = (res.content && res.content[0] && res.content[0].text) || '';
-    if(text==='No memories found.'){ render([]); return; }
-    const blocks = text.split('\\n\\n').map(b=>{
-      const lines=b.split('\\n');
-      const m=lines[0].match(/^\\[(\\w+)\\]\\s+(.*)$/);
-      return { importance:(m?m[1]:'medium').toLowerCase(),
-        _kind:(m&&m[1].toLowerCase()==='memoir')?'memoir':null,
-        topic:m?m[2]:lines[0], summary:lines.slice(1).join(' ') };
-    });
-    render(blocks);
-  } catch(e){ document.getElementById('list').innerHTML=
-    '<div class="empty">Search failed.</div>'; }
+    const r = await (await fetch('/memories?' + urlParams({q}))).json();
+    render(r.memories || []);
+  } catch(e){
+    $('list').innerHTML = '<div class="empty">Search failed.</div>';
+  }
 }
-document.getElementById('q').addEventListener('keydown',e=>{ if(e.key==='Enter') search(); });
-loadStats(); loadRecent();
+
+function clearSearch(){ $('q').value = ''; $('projectFilter').value = ''; loadRecent(); }
+
+// ──── cluster modal ────
+async function openClusters(){
+  $('clusterModal').classList.add('open');
+  $('clusterBody').innerHTML = '<div class="empty">Scanning for near-duplicates…</div>';
+  try {
+    const r = await (await fetch('/clusters?threshold=0.85' +
+      ($('projectFilter').value ? '&project=' + encodeURIComponent($('projectFilter').value) : ''))).json();
+    const clusters = r.clusters || [];
+    if(!clusters.length){
+      $('clusterBody').innerHTML = '<div class="empty">No near-duplicates detected. Your store is tidy.</div>';
+      $('consolidateBtn').style.display = 'none';
+      return;
+    }
+    $('consolidateBtn').style.display = '';
+    $('clusterBody').innerHTML = clusters.map((c, i) =>
+      `<div class="cluster">
+        <div class="cluster-head">Cluster ${i+1} <span style="color:var(--muted);font-weight:400">${c.length} memories</span></div>
+        ${c.slice(0,5).map(m =>
+          `<div class="cluster-item"><strong>${esc(m.topic||'')}</strong>: ${esc((m.summary||'').slice(0,160))}</div>`
+        ).join('')}
+        ${c.length>5 ? `<div class="cluster-item" style="font-style:italic">…and ${c.length-5} more</div>` : ''}
+      </div>`).join('');
+  } catch(e){
+    $('clusterBody').innerHTML = '<div class="empty">Failed to load clusters.</div>';
+  }
+}
+function closeClusters(){ $('clusterModal').classList.remove('open'); }
+async function runConsolidate(){
+  if(!confirm('Merge every detected cluster into one survivor each?\nDuplicates will be deleted.')) return;
+  const btn = $('consolidateBtn');
+  btn.disabled = true; btn.textContent = 'Consolidating…';
+  try {
+    const r = await (await fetch('/tools/call', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({name:'noshy_consolidate_clusters',
+        arguments:{threshold:0.85,
+          project:$('projectFilter').value || undefined}})
+    })).json();
+    alert((r.content && r.content[0] && r.content[0].text) || 'Done.');
+    closeClusters();
+    loadStats(); loadProjects(); loadRecent();
+  } catch(e){ alert('Failed: ' + e); }
+  finally { btn.disabled = false; btn.textContent = 'Consolidate all'; }
+}
+
+// ──── wiring ────
+$('q').addEventListener('keydown', e => { if(e.key==='Enter') search(); });
+$('projectFilter').addEventListener('change', () => $('q').value ? search() : loadRecent());
+$('clusterBtn').addEventListener('click', openClusters);
+
+loadStats(); loadProjects(); loadRecent();
 setInterval(loadStats, 15000);
+setInterval(loadProjects, 30000);
 </script>
 </body>
 </html>"""
@@ -716,6 +966,28 @@ def run_http(host: str = "127.0.0.1", port: int = 8720, db_path: str = None):
                 log.exception("HTTP POST error")
                 self._send_json(500, {"error": str(e)})
 
+        def do_DELETE(self):
+            if not self._require_auth():
+                return
+            try:
+                from urllib.parse import urlparse
+                path = urlparse(self.path).path
+                if path.startswith("/memories/"):
+                    mem_id = path[len("/memories/"):]
+                    if not mem_id:
+                        self._send_json(400, {"error": "missing memory id"})
+                        return
+                    ok = store.delete_memory(mem_id)
+                    if ok:
+                        self._send_json(200, {"deleted": mem_id})
+                    else:
+                        self._send_json(404, {"error": "not found", "id": mem_id})
+                else:
+                    self._send_json(404, {"error": "unknown endpoint"})
+            except Exception as e:
+                log.exception("HTTP DELETE error")
+                self._send_json(500, {"error": str(e)})
+
         def _send_html(self, status: int, html: str):
             data = html.encode("utf-8")
             self.send_response(status)
@@ -743,17 +1015,35 @@ def run_http(host: str = "127.0.0.1", port: int = 8720, db_path: str = None):
                     limit = int(qs.get("limit", ["25"])[0])
                     limit = max(1, min(limit, 200))
                     project = qs.get("project", [None])[0]
-                    sql = ("SELECT id, created_at, topic, summary, importance, weight, "
-                           "project, access_count FROM memories "
-                           "WHERE (expires_at IS NULL OR expires_at > ?)")
-                    params = [_now_iso()]
-                    if project:
-                        sql += " AND project = ?"
-                        params.append(project)
-                    sql += " ORDER BY created_at DESC LIMIT ?"
-                    params.append(limit)
-                    rows = [dict(r) for r in store.conn.execute(sql, params).fetchall()]
-                    self._send_json(200, {"memories": rows})
+                    query = qs.get("q", [""])[0].strip()
+                    if query:
+                        # Hybrid search via the store; trim heavy fields for the wire
+                        results = store.recall_hybrid(query, limit=limit, project=project)
+                        out = []
+                        for r in results:
+                            d = {k: v for k, v in r.items() if k != "embedding"}
+                            # Normalize memoir vs memory shape for the client
+                            if d.get("_kind") == "memoir":
+                                d["importance"] = "memoir"
+                            out.append(d)
+                        self._send_json(200, {"memories": out})
+                    else:
+                        sql = ("SELECT id, created_at, topic, summary, importance, weight, "
+                               "project, access_count FROM memories "
+                               "WHERE (expires_at IS NULL OR expires_at > ?)")
+                        params = [_now_iso()]
+                        if project:
+                            sql += " AND project = ?"
+                            params.append(project)
+                        sql += " ORDER BY created_at DESC LIMIT ?"
+                        params.append(limit)
+                        rows = [dict(r) for r in store.conn.execute(sql, params).fetchall()]
+                        self._send_json(200, {"memories": rows})
+                elif path == "/clusters":
+                    threshold = float(qs.get("threshold", ["0.85"])[0])
+                    project = qs.get("project", [None])[0]
+                    clusters = store.find_clusters(threshold=threshold, project=project)
+                    self._send_json(200, {"clusters": clusters[:20]})
                 elif path == "/projects":
                     self._send_json(200, {"projects": store.list_projects()})
                 elif path == "/tools/list":

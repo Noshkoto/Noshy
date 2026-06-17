@@ -1,0 +1,8 @@
+include README.md
+include LICENSE
+include pyproject.toml
+include Dockerfile
+include install.sh
+graft tests
+prune __pycache__
+global-exclude *.pyc *.pyo *.pyd .DS_Store

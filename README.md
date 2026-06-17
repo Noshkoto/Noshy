@@ -42,14 +42,21 @@ Noshy gives your AI agent real memory — not note-taking, not context stuffing,
 ## Quick Start
 
 ```bash
-# Install
+# Install from PyPI (recommended)
+pip install noshy
+
+# Start the HTTP server + dashboard
+noshy serve
+# → http://127.0.0.1:8720/
+
+# Or run as an MCP stdio server
+noshy mcp
+```
+
+Or install from source:
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/noshkoto/Noshy/main/install.sh | sh
-
-# Start HTTP server
-cd ~/.noshy/src && python3 server.py http
-
-# Or MCP stdio mode
-cd ~/.noshy/src && python3 server.py mcp
 ```
 
 ## Usage
@@ -134,6 +141,7 @@ mcp_servers:
 | `noshy_store_memoir` | Store permanent knowledge (docs, reference) |
 | `noshy_recall` | Search memories (keyword, semantic, hybrid) — also surfaces matching memoirs |
 | `noshy_extract_session` | LLM-powered extraction from conversation transcripts |
+| `noshy_stream_extract` | Incremental extraction for very long transcripts (chunked + overlap) |
 | `noshy_consolidate` | Merge related memories on a topic |
 | `noshy_delete` | Remove a memory by id, or all memories under a topic |
 | `noshy_feedback` | Rate a memory +1/-1 to influence how long it survives |
@@ -174,8 +182,13 @@ python3 server.py http
 # then visit http://127.0.0.1:8720/
 ```
 
-It shows live store stats, recent memories (color-coded by importance), and a
-hybrid search box over both memories and memoirs.
+Dashboard features:
+
+- **Project picker** — filter recent memories and search by project
+- **Hybrid search** — keyword + semantic + graph in one query box; memoirs included
+- **Cluster view** — surface groups of near-duplicate memories and merge them in one click
+- **Inline delete** — hover a card, click `×` to remove it (with confirmation)
+- **Dark / light theme** — auto-detected, manually toggleable, persisted to `localStorage`
 
 ### Python API
 
@@ -391,8 +404,10 @@ The schema is compatible — memories, memoirs, concepts, and metadata all trans
 - [x] HTTP bearer-token auth (`NOSHY_HTTP_TOKEN`)
 - [x] Real Dockerfile (multi-stage, non-root, healthcheck)
 - [x] Integration test suite (`pytest tests/`)
+- [x] PyPI release (`pip install noshy`)
+- [x] Streaming extraction MCP tool (`noshy_stream_extract`)
+- [x] Dashboard polish (project picker, cluster view, inline delete, theme toggle)
 - [ ] Per-user database isolation (multi-tenant — one DB per token)
-- [ ] PyPI release
 
 ## License
 

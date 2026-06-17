@@ -101,7 +101,9 @@ def extract_facts(
     if len(transcript.strip()) < 50:
         return []
 
-    prompt = EXTRACTION_PROMPT.format(transcript=transcript[:12000])
+    # str.replace, not str.format — the prompt contains literal { and } in the
+    # JSON example, so format() would raise KeyError on those braces.
+    prompt = EXTRACTION_PROMPT.replace("{transcript}", transcript[:12000])
 
     response = _call_llm(prompt, api_base=api_base, api_key=api_key, model=model)
     if not response:
