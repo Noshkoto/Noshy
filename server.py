@@ -14,7 +14,7 @@ from typing import Optional, List, Dict, Any
 # Add parent to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from store import NoshyStore
+from store import NoshyStore, _utcnow_iso as _now_iso
 from extractor import extract_facts, consolidate_memories
 from embed import auto_embedder
 from context import session_context, decision_timeline, detect_patterns, extract_preferences
@@ -398,6 +398,143 @@ def run_stdio(db_path: str = None):
                 })
 
 
+# ──────────── Web Dashboard ────────────
+
+DASHBOARD_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Noshy — Memory Dashboard</title>
+<style>
+  :root {
+    --bg:#0e1117; --panel:#161b22; --border:#272e3a; --text:#e6edf3;
+    --muted:#8b949e; --accent:#5b8def; --crit:#f85149; --high:#d29922;
+    --med:#3fb950; --low:#6e7681;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+  header { padding:20px 28px; border-bottom:1px solid var(--border);
+    display:flex; align-items:center; gap:14px; }
+  header h1 { margin:0; font-size:20px; font-weight:650; }
+  header .dot { width:10px; height:10px; border-radius:50%; background:var(--med); }
+  .wrap { max-width:1100px; margin:0 auto; padding:24px 28px; }
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
+    gap:14px; margin-bottom:24px; }
+  .stat { background:var(--panel); border:1px solid var(--border); border-radius:10px;
+    padding:16px 18px; }
+  .stat .n { font-size:26px; font-weight:700; }
+  .stat .l { color:var(--muted); font-size:12px; text-transform:uppercase;
+    letter-spacing:.04em; margin-top:4px; }
+  .searchbar { display:flex; gap:10px; margin-bottom:18px; }
+  .searchbar input { flex:1; background:var(--panel); border:1px solid var(--border);
+    border-radius:8px; padding:10px 14px; color:var(--text); font-size:14px; }
+  .searchbar button { background:var(--accent); border:0; border-radius:8px;
+    color:#fff; padding:0 18px; font-weight:600; cursor:pointer; }
+  .searchbar button:hover { filter:brightness(1.08); }
+  .mem { background:var(--panel); border:1px solid var(--border); border-radius:10px;
+    padding:14px 16px; margin-bottom:10px; display:flex; gap:14px; align-items:flex-start; }
+  .badge { flex:none; font-size:10px; font-weight:700; padding:3px 8px; border-radius:5px;
+    text-transform:uppercase; letter-spacing:.03em; margin-top:2px; }
+  .b-critical{background:rgba(248,81,73,.16);color:var(--crit);}
+  .b-high{background:rgba(210,153,34,.16);color:var(--high);}
+  .b-medium{background:rgba(63,185,80,.16);color:var(--med);}
+  .b-low{background:rgba(110,118,129,.16);color:var(--low);}
+  .b-memoir{background:rgba(91,141,239,.16);color:var(--accent);}
+  .mem .body { flex:1; min-width:0; }
+  .mem .topic { font-weight:600; }
+  .mem .summary { color:var(--muted); margin-top:2px; word-wrap:break-word; }
+  .mem .meta { color:var(--low); font-size:11px; margin-top:6px; }
+  .empty { color:var(--muted); text-align:center; padding:40px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.05em;
+    color:var(--muted); margin:24px 0 12px; }
+</style>
+</head>
+<body>
+<header><span class="dot"></span><h1>Noshy</h1>
+  <span style="color:var(--muted)">persistent memory dashboard</span></header>
+<div class="wrap">
+  <div class="stats" id="stats"></div>
+  <div class="searchbar">
+    <input id="q" placeholder="Search memories &amp; memoirs…" autofocus>
+    <button onclick="search()">Search</button>
+  </div>
+  <h2 id="listTitle">Recent memories</h2>
+  <div id="list"><div class="empty">Loading…</div></div>
+</div>
+<script>
+const esc = s => (s||"").replace(/[&<>"]/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function loadStats(){
+  try {
+    const s = await (await fetch('/stats')).json();
+    const cards = [
+      ['memory_count','Memories'],['memoir_count','Memoirs'],
+      ['concept_count','Concepts'],['edge_count','Edges']
+    ];
+    document.getElementById('stats').innerHTML = cards.map(([k,l]) =>
+      `<div class="stat"><div class="n">${s[k]??0}</div><div class="l">${l}</div></div>`
+    ).join('') +
+      `<div class="stat"><div class="n">${(s.avg_weight??0).toFixed(2)}</div>`+
+      `<div class="l">Avg weight</div></div>`;
+  } catch(e){ console.error(e); }
+}
+function render(items, kindFromBadge){
+  const list = document.getElementById('list');
+  if(!items.length){ list.innerHTML='<div class="empty">Nothing here yet.</div>'; return; }
+  list.innerHTML = items.map(m => {
+    const imp = (m._kind==='memoir') ? 'memoir'
+      : (m.importance||'medium').toLowerCase();
+    const when = (m.created_at||'').slice(0,10);
+    const proj = (m.project && m.project!=='default') ? ' · '+esc(m.project) : '';
+    const w = (m.weight!=null) ? ' · w'+Number(m.weight).toFixed(2) : '';
+    return `<div class="mem"><span class="badge b-${imp}">${imp}</span>`+
+      `<div class="body"><div class="topic">${esc(m.topic||m.title||'')}</div>`+
+      `<div class="summary">${esc(m.summary||m.content||'')}</div>`+
+      `<div class="meta">${when}${proj}${w}</div></div></div>`;
+  }).join('');
+}
+async function loadRecent(){
+  document.getElementById('listTitle').textContent='Recent memories';
+  try {
+    const r = await (await fetch('/memories?limit=25')).json();
+    render(r.memories||[]);
+  } catch(e){ document.getElementById('list').innerHTML=
+    '<div class="empty">Failed to load.</div>'; }
+}
+async function search(){
+  const q = document.getElementById('q').value.trim();
+  if(!q){ loadRecent(); return; }
+  document.getElementById('listTitle').textContent='Results for "'+q+'"';
+  try {
+    const res = await (await fetch('/tools/call',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({name:'noshy_recall',
+        arguments:{query:q, mode:'hybrid', limit:25}})})).json();
+    // recall returns formatted text; re-query /memories filtered client-side is
+    // not ideal, so parse the text blocks back into cards.
+    const text = (res.content && res.content[0] && res.content[0].text) || '';
+    if(text==='No memories found.'){ render([]); return; }
+    const blocks = text.split('\\n\\n').map(b=>{
+      const lines=b.split('\\n');
+      const m=lines[0].match(/^\\[(\\w+)\\]\\s+(.*)$/);
+      return { importance:(m?m[1]:'medium').toLowerCase(),
+        _kind:(m&&m[1].toLowerCase()==='memoir')?'memoir':null,
+        topic:m?m[2]:lines[0], summary:lines.slice(1).join(' ') };
+    });
+    render(blocks);
+  } catch(e){ document.getElementById('list').innerHTML=
+    '<div class="empty">Search failed.</div>'; }
+}
+document.getElementById('q').addEventListener('keydown',e=>{ if(e.key==='Enter') search(); });
+loadStats(); loadRecent();
+setInterval(loadStats, 15000);
+</script>
+</body>
+</html>"""
+
+
 # ──────────── HTTP API mode ────────────
 
 def run_http(host: str = "127.0.0.1", port: int = 8720, db_path: str = None):
@@ -446,13 +583,43 @@ def run_http(host: str = "127.0.0.1", port: int = 8720, db_path: str = None):
                 log.exception("HTTP POST error")
                 self._send_json(500, {"error": str(e)})
 
+        def _send_html(self, status: int, html: str):
+            data = html.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
         def do_GET(self):
             try:
-                if self.path == "/stats":
+                from urllib.parse import urlparse, parse_qs
+                parsed = urlparse(self.path)
+                path = parsed.path
+                qs = parse_qs(parsed.query)
+
+                if path in ("/", "/dashboard"):
+                    self._send_html(200, DASHBOARD_HTML)
+                elif path == "/stats":
                     self._send_json(200, store.get_stats())
-                elif self.path == "/tools/list":
+                elif path == "/memories":
+                    limit = int(qs.get("limit", ["25"])[0])
+                    limit = max(1, min(limit, 200))
+                    project = qs.get("project", [None])[0]
+                    sql = ("SELECT id, created_at, topic, summary, importance, weight, "
+                           "project, access_count FROM memories "
+                           "WHERE (expires_at IS NULL OR expires_at > ?)")
+                    params = [_now_iso()]
+                    if project:
+                        sql += " AND project = ?"
+                        params.append(project)
+                    sql += " ORDER BY created_at DESC LIMIT ?"
+                    params.append(limit)
+                    rows = [dict(r) for r in store.conn.execute(sql, params).fetchall()]
+                    self._send_json(200, {"memories": rows})
+                elif path == "/tools/list":
                     self._send_json(200, {"tools": MCP_TOOLS})
-                elif self.path == "/health":
+                elif path == "/health":
                     self._send_json(200, {"status": "ok"})
                 else:
                     self._send_json(404, {"error": "unknown endpoint"})
