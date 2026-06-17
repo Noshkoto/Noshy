@@ -196,6 +196,30 @@ MCP_TOOLS = [
             "required": ["summary"],
         },
     },
+    {
+        "name": "noshy_find_clusters",
+        "description": "Find clusters of near-duplicate memories using embedding similarity. Returns cluster previews without modifying anything.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "threshold": {"type": "number", "default": 0.85, "description": "Cosine similarity threshold (0-1)"},
+                "project": {"type": "string", "description": "Limit to a project"},
+                "min_size": {"type": "integer", "default": 2},
+            },
+        },
+    },
+    {
+        "name": "noshy_consolidate_clusters",
+        "description": "Auto-detect clusters of similar memories and consolidate each one. Returns counts. Run periodically to keep the store tidy.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "threshold": {"type": "number", "default": 0.88},
+                "project": {"type": "string"},
+                "max_clusters": {"type": "integer", "default": 20},
+            },
+        },
+    },
 ]
 
 
@@ -379,6 +403,32 @@ def handle_tools_call(params: Dict) -> Dict:
             from extractor import predict_importance
             score = predict_importance(args.get("topic", ""), args["summary"])
             return {"content": [{"type": "text", "text": score}]}
+
+        elif name == "noshy_find_clusters":
+            clusters = store.find_clusters(
+                threshold=float(args.get("threshold", 0.85)),
+                project=args.get("project"),
+                min_size=int(args.get("min_size", 2)),
+            )
+            if not clusters:
+                return {"content": [{"type": "text", "text": "No clusters detected."}]}
+            lines = []
+            for i, cluster in enumerate(clusters[:10], 1):
+                lines.append(f"Cluster {i} ({len(cluster)} memories):")
+                for m in cluster[:4]:
+                    lines.append(f"  - {m['topic']}: {(m['summary'] or '')[:120]}")
+                if len(cluster) > 4:
+                    lines.append(f"  …and {len(cluster) - 4} more")
+            return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+
+        elif name == "noshy_consolidate_clusters":
+            counts = store.consolidate_clusters(
+                threshold=float(args.get("threshold", 0.88)),
+                project=args.get("project"),
+                max_clusters=int(args.get("max_clusters", 20)),
+            )
+            return {"content": [{"type": "text",
+                "text": f"Consolidated {counts['clusters']} clusters, removed {counts['merged']} duplicates."}]}
 
         else:
             return {"content": [{"type": "text", "text": f"Unknown tool: {name}"}], "isError": True}
@@ -592,8 +642,25 @@ setInterval(loadStats, 15000);
 def run_http(host: str = "127.0.0.1", port: int = 8720, db_path: str = None):
     """Run Noshy as an HTTP API server."""
     global store
+    import hmac
     embedder = auto_embedder()
     store = NoshyStore(db_path=db_path, embedder=embedder)
+
+    auth_token = os.environ.get("NOSHY_HTTP_TOKEN", "")
+    if auth_token:
+        log.info("HTTP auth enabled (Bearer token required)")
+    public_paths = {"/health"}
+
+    def _is_authorized(handler) -> bool:
+        if not auth_token:
+            return True
+        if handler.path.split("?", 1)[0] in public_paths:
+            return True
+        header = handler.headers.get("Authorization", "")
+        if not header.startswith("Bearer "):
+            return False
+        provided = header[len("Bearer "):].strip()
+        return hmac.compare_digest(provided, auth_token)
 
     from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
@@ -606,7 +673,21 @@ def run_http(host: str = "127.0.0.1", port: int = 8720, db_path: str = None):
             self.end_headers()
             self.wfile.write(data)
 
+        def _require_auth(self) -> bool:
+            if _is_authorized(self):
+                return True
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Bearer realm="noshy"')
+            self.send_header("Content-Type", "application/json")
+            data = b'{"error":"unauthorized"}'
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return False
+
         def do_POST(self):
+            if not self._require_auth():
+                return
             try:
                 length = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(length)) if length > 0 else {}
@@ -649,6 +730,10 @@ def run_http(host: str = "127.0.0.1", port: int = 8720, db_path: str = None):
                 parsed = urlparse(self.path)
                 path = parsed.path
                 qs = parse_qs(parsed.query)
+
+                # Public paths bypass auth; everything else requires it when configured
+                if path not in ("/", "/dashboard", "/health") and not self._require_auth():
+                    return
 
                 if path in ("/", "/dashboard"):
                     self._send_html(200, DASHBOARD_HTML)
@@ -716,18 +801,51 @@ def main():
     imp = sub.add_parser("import", help="Import from ICM database")
     imp.add_argument("icm_path", help="Path to ICM memories.db")
 
-    # CLI commands
-    sub.add_parser("stats", help="Show memory stats")
-    recall_p = sub.add_parser("recall", help="Recall memories")
+    # Per-subcommand --json flag. Goes after the subcommand:
+    #   noshy stats --json
+    def _add_json(sp):
+        sp.add_argument("--json", action="store_true",
+                        help="Emit JSON output instead of human-readable text")
+        return sp
+
+    _add_json(sub.add_parser("stats", help="Show memory stats"))
+    recall_p = _add_json(sub.add_parser("recall", help="Recall memories"))
     recall_p.add_argument("query")
     recall_p.add_argument("--project", default=None)
     recall_p.add_argument("--limit", type=int, default=15)
 
-    store_p = sub.add_parser("store", help="Store a memory")
+    store_p = _add_json(sub.add_parser("store", help="Store a memory"))
     store_p.add_argument("topic")
     store_p.add_argument("summary")
-    store_p.add_argument("--importance", default="medium")
+    store_p.add_argument("--importance", default="medium",
+                        choices=["critical", "high", "medium", "low", "auto"])
     store_p.add_argument("--project", default="default")
+    store_p.add_argument("--ttl", type=int, default=None,
+                        help="Auto-expire after this many seconds")
+
+    projects_p = _add_json(sub.add_parser("projects", help="List projects with counts and last activity"))
+
+    del_p = _add_json(sub.add_parser("delete", help="Delete a memory by id, a topic, or a whole project"))
+    del_g = del_p.add_mutually_exclusive_group(required=True)
+    del_g.add_argument("--id", help="Exact memory id to delete")
+    del_g.add_argument("--topic", help="Delete all memories under this topic")
+    del_g.add_argument("--project", help="Delete an ENTIRE project (irreversible)")
+    del_p.add_argument("--scope", help="Optional project scope for --topic")
+    del_p.add_argument("--yes", action="store_true", help="Skip the confirmation prompt for --project")
+
+    cc_p = _add_json(sub.add_parser("consolidate-clusters",
+                          help="Auto-detect and merge near-duplicate memories across topics"))
+    cc_p.add_argument("--threshold", type=float, default=0.88)
+    cc_p.add_argument("--project", default=None)
+    cc_p.add_argument("--max-clusters", type=int, default=20)
+
+    _add_json(sub.add_parser("purge", help="Delete expired memories now"))
+    _add_json(sub.add_parser("sweep", help="Run the full maintenance sweep (purge + decay + consolidate)"))
+
+    # "serve" is a friendly alias for "http"
+    serve_p = sub.add_parser("serve", help="Alias for `http` — start the HTTP server + dashboard")
+    serve_p.add_argument("--host", default="127.0.0.1")
+    serve_p.add_argument("--port", type=int, default=8720)
 
     args = parser.parse_args()
 
@@ -736,35 +854,103 @@ def main():
         return
 
     db = getattr(args, 'db', None)
+    as_json = getattr(args, 'json', False)
 
     if args.command == "mcp":
         run_stdio(db_path=db)
         return
-    if args.command == "http":
+    if args.command in ("http", "serve"):
         run_http(args.host, args.port, db_path=db)
         return
 
     global store
     store = NoshyStore(db_path=db, embedder=auto_embedder())
 
+    def _out(text_lines, payload):
+        if as_json:
+            print(json.dumps(payload, indent=2, default=str))
+        else:
+            print("\n".join(text_lines))
+
     if args.command == "import":
         count = store.import_icm(args.icm_path)
-        print(f"Imported {count} memories from {args.icm_path}")
+        _out([f"Imported {count} memories from {args.icm_path}"],
+             {"imported": count, "source": args.icm_path})
     elif args.command == "stats":
         stats = store.get_stats()
-        for k, v in stats.items():
-            print(f"{k}: {v}")
+        _out([f"{k}: {v}" for k, v in stats.items()], stats)
     elif args.command == "recall":
         results = store.recall_hybrid(args.query, limit=args.limit, project=args.project)
-        for i, r in enumerate(results, 1):
-            print(f"{i}. [{(r.get('importance') or 'm').upper()}] {r['topic']}")
-            print(f"   {r['summary']}\n")
+        if as_json:
+            slim = [{k: v for k, v in r.items() if k != "embedding"} for r in results]
+            print(json.dumps(slim, indent=2, default=str))
+        elif not results:
+            print("No memories found.")
+        else:
+            for i, r in enumerate(results, 1):
+                imp = (r.get('importance') or 'medium').upper()
+                kind = " [MEMOIR]" if r.get("_kind") == "memoir" else ""
+                print(f"{i}. [{imp}]{kind} {r.get('topic') or r.get('title')}")
+                print(f"   {(r.get('summary') or r.get('content') or '')[:240]}\n")
     elif args.command == "store":
         mid = store.store_memory(
             topic=args.topic, summary=args.summary,
             importance=args.importance, project=args.project,
+            ttl_seconds=args.ttl,
         )
-        print(f"Stored: {mid}")
+        _out([f"Stored: {mid}"], {"id": mid, "topic": args.topic, "project": args.project})
+    elif args.command == "projects":
+        projs = store.list_projects()
+        if as_json:
+            print(json.dumps(projs, indent=2, default=str))
+        elif not projs:
+            print("No projects yet.")
+        else:
+            for p in projs:
+                last = (p.get("last_activity") or "")[:10]
+                print(f"{p['project']:24} {p['memory_count']:>5} memories  "
+                      f"{p['memoir_count']:>3} memoirs  (last: {last})")
+    elif args.command == "delete":
+        if args.id:
+            ok = store.delete_memory(args.id)
+            _out([f"{'Deleted' if ok else 'Not found:'} {args.id}"],
+                 {"deleted": int(ok), "id": args.id})
+        elif args.topic:
+            n = store.delete_by_topic(args.topic, project=args.scope)
+            _out([f"Deleted {n} memory(ies) under topic '{args.topic}'"],
+                 {"deleted": n, "topic": args.topic, "scope": args.scope})
+        elif args.project:
+            if not args.yes:
+                resp = input(f"Delete ALL memories and memoirs for project "
+                             f"'{args.project}'? Type the project name to confirm: ")
+                if resp.strip() != args.project:
+                    print("Aborted.")
+                    return
+            counts = store.delete_project(args.project)
+            _out([f"Deleted project '{args.project}': {counts['memories']} memories, "
+                  f"{counts['memoirs']} memoirs"],
+                 {"project": args.project, **counts})
+    elif args.command == "consolidate-clusters":
+        counts = store.consolidate_clusters(
+            threshold=args.threshold, project=args.project,
+            max_clusters=args.max_clusters,
+        )
+        _out([f"Consolidated {counts['clusters']} clusters, "
+              f"removed {counts['merged']} duplicates"], counts)
+    elif args.command == "purge":
+        n = store.purge_expired()
+        _out([f"Purged {n} expired memories"], {"purged": n})
+    elif args.command == "sweep":
+        from hooks import daily_sweep
+        # daily_sweep instantiates its own store, but we already opened the DB;
+        # it'll honor NOSHY_DB if set, so just call it.
+        result = daily_sweep()
+        _out([f"Sweep: purged={result['purged']}, "
+              f"consolidated={result['consolidated']}, "
+              f"clusters={result.get('clusters', 0)}",
+              f"Store: {result['stats']['memory_count']} memories, "
+              f"avg weight {(result['stats']['avg_weight'] or 0):.2f}"],
+             result)
 
 
 if __name__ == "__main__":

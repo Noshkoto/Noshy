@@ -57,11 +57,24 @@ cd ~/.noshy/src && python3 server.py mcp
 ### CLI
 
 ```bash
-# Store a memory
+# Store a memory (optional --ttl, --importance auto, --project)
 python3 server.py store "deploy-config" "Deploy uses Cloudflare Pages with GitHub Actions"
 
-# Recall
+# Recall (add --json for machine output)
 python3 server.py recall "deployment config"
+
+# List projects with counts and last activity
+python3 server.py projects
+
+# Delete: by id, by topic, or wipe an entire project
+python3 server.py delete --id 01J...
+python3 server.py delete --topic "old-bug" --scope onboarding
+python3 server.py delete --project staging --yes
+
+# Maintenance
+python3 server.py purge                  # delete expired
+python3 server.py consolidate-clusters   # merge near-duplicates
+python3 server.py sweep                  # purge + decay + consolidate
 
 # Import from ICM
 python3 server.py import /path/to/icm/memories.db
@@ -127,6 +140,8 @@ mcp_servers:
 | `noshy_list_projects` | List every project with per-project counts and last activity |
 | `noshy_delete_project` | Wipe all memories and memoirs for a project (irreversible) |
 | `noshy_predict_importance` | LLM-classify a candidate fact without storing it |
+| `noshy_find_clusters` | Preview clusters of semantically near-duplicate memories |
+| `noshy_consolidate_clusters` | Auto-merge those clusters in one pass |
 | `noshy_get_stats` | Database overview |
 
 ### HTTP API
@@ -255,13 +270,46 @@ python $env:USERPROFILE\.noshy\src\server.py http
 ```
 
 ### Docker
+
 ```bash
+# Build the image from the included Dockerfile
+docker build -t noshy .
+
+# Run it (data persists in a named volume)
 docker run -d --name noshy \
   -p 8720:8720 \
-  -v noshy-data:/root/.noshy \
+  -v noshy-data:/data \
   -e OPENAI_API_KEY=sk-... \
-  ghcr.io/noshkoto/Noshy:latest
+  noshy
+
+# Or with HTTP auth enabled
+docker run -d --name noshy \
+  -p 8720:8720 \
+  -v noshy-data:/data \
+  -e NOSHY_HTTP_TOKEN=$(openssl rand -hex 32) \
+  noshy
+
+# Optional build flags
+docker build --build-arg WITH_FASTEMBED=1 -t noshy .   # bake local embeddings
+docker build --build-arg WITH_SQLITE_VEC=0 -t noshy .  # skip the vec extension
 ```
+
+The image runs as a non-root user, exposes a `/health` endpoint, and uses
+`/data` as a persistent volume.
+
+### HTTP authentication
+
+By default the HTTP server is unauthenticated and binds to `127.0.0.1` only.
+To expose it on a network or behind a proxy, set a bearer token:
+
+```bash
+export NOSHY_HTTP_TOKEN="$(openssl rand -hex 32)"
+python3 server.py serve --host 0.0.0.0
+```
+
+Clients must then send `Authorization: Bearer <token>` on every request. The
+`/health` endpoint and the dashboard HTML at `/` stay public so probes and
+human visitors still work.
 
 ## Configuration
 
@@ -275,6 +323,7 @@ docker run -d --name noshy \
 | `NOSHY_API_BASE` | `http://127.0.0.1:8642/v1` | LLM API for extraction |
 | `NOSHY_API_KEY` | `API_SERVER_KEY` | LLM API key |
 | `NOSHY_MODEL` | `hermes-agent` | Model for extraction |
+| `NOSHY_HTTP_TOKEN` | _unset_ | If set, all HTTP routes require `Authorization: Bearer <token>` (except `/health` and `/`) |
 
 ## Architecture
 
@@ -338,8 +387,12 @@ The schema is compatible — memories, memoirs, concepts, and metadata all trans
 - [x] Memory importance prediction (`importance="auto"`)
 - [x] Streaming extraction (`extractor.stream_extract`)
 - [x] Project isolation (`list_projects` / `delete_project`)
-- [ ] Graph-based memory consolidation (auto-detect clusters)
-- [ ] Multi-tenant auth / per-user databases
+- [x] Graph-based memory consolidation (`find_clusters` / `consolidate_clusters`)
+- [x] HTTP bearer-token auth (`NOSHY_HTTP_TOKEN`)
+- [x] Real Dockerfile (multi-stage, non-root, healthcheck)
+- [x] Integration test suite (`pytest tests/`)
+- [ ] Per-user database isolation (multi-tenant — one DB per token)
+- [ ] PyPI release
 
 ## License
 

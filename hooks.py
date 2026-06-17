@@ -166,6 +166,14 @@ def daily_sweep(project: str = None):
         except Exception as e:
             log.warning(f"Consolidation failed for {row['topic']}: {e}")
 
+    # Cross-topic similarity consolidation (best-effort; needs embeddings)
+    cluster_stats = {"clusters": 0, "merged": 0}
+    try:
+        cluster_stats = store.consolidate_clusters(threshold=0.88)
+        consolidated += cluster_stats["merged"]
+    except Exception as e:
+        log.debug(f"Cluster consolidation skipped: {e}")
+
     stats = store.get_stats()
 
     avg_w = stats['avg_weight'] or 0.0
@@ -175,6 +183,7 @@ def daily_sweep(project: str = None):
     return {
         "purged": purged,
         "consolidated": consolidated,
+        "clusters": cluster_stats["clusters"],
         "stats": stats,
     }
 

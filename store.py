@@ -626,6 +626,142 @@ class NoshyStore:
         self.conn.commit()
         return len(gone)
 
+    # ──────────── Cluster detection ────────────
+
+    def find_clusters(
+        self,
+        *,
+        threshold: float = 0.85,
+        project: str = None,
+        min_size: int = 2,
+        sample_limit: int = 500,
+    ) -> List[List[Dict]]:
+        """Find clusters of semantically near-duplicate memories.
+
+        Pairs of memories whose summary embeddings have cosine similarity at or
+        above `threshold` are unioned together. Returns the resulting clusters
+        as lists of memory dicts (one list per cluster) with at least
+        `min_size` members each, biggest cluster first.
+
+        Only considers memories that have an embedding stored; capped to the
+        most recent `sample_limit` rows to keep this O(n²) step bounded.
+        """
+        query = (
+            "SELECT id, topic, summary, weight, project, created_at, embedding "
+            "FROM memories WHERE embedding IS NOT NULL "
+            "AND (expires_at IS NULL OR expires_at > ?)"
+        )
+        params: List[Any] = [_utcnow_iso()]
+        if project:
+            query += " AND project = ?"
+            params.append(project)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(sample_limit)
+        rows = self.conn.execute(query, params).fetchall()
+        n = len(rows)
+        if n < 2:
+            return []
+
+        parent = list(range(n))
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a: int, b: int):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        for i in range(n):
+            ei = rows[i]["embedding"]
+            if not ei:
+                continue
+            for j in range(i + 1, n):
+                ej = rows[j]["embedding"]
+                if not ej:
+                    continue
+                if _cosine_similarity(ei, ej) >= threshold:
+                    union(i, j)
+
+        groups: Dict[int, List[Dict]] = {}
+        for i, row in enumerate(rows):
+            root = find(i)
+            d = dict(row)
+            d.pop("embedding", None)
+            groups.setdefault(root, []).append(d)
+
+        clusters = [g for g in groups.values() if len(g) >= min_size]
+        clusters.sort(key=lambda g: (-len(g), min((m["id"] for m in g))))
+        return clusters
+
+    def consolidate_clusters(
+        self,
+        *,
+        threshold: float = 0.88,
+        project: str = None,
+        max_clusters: int = 20,
+    ) -> Dict[str, int]:
+        """Run find_clusters and consolidate each one.
+
+        For each cluster, keeps the highest-weight memory as the survivor,
+        merges all summaries into it, transfers graph edges, deletes the rest.
+        Returns {"clusters": N, "merged": K} where K is total rows removed.
+        """
+        clusters = self.find_clusters(threshold=threshold, project=project)
+        merged_total = 0
+        processed = 0
+        for cluster in clusters[:max_clusters]:
+            # Sort survivor candidate to the end (consolidate() keeps rows[-1])
+            ranked = sorted(
+                cluster,
+                key=lambda r: (
+                    (r.get("weight") or 0),
+                    r.get("created_at") or "",
+                ),
+            )
+            ids = [r["id"] for r in ranked]
+            gone = ids[:-1]
+            survivor_id = ids[-1]
+
+            # De-duplicate summaries while preserving order
+            seen = set()
+            parts = []
+            for r in ranked:
+                s = (r.get("summary") or "").strip()
+                if s and s not in seen:
+                    seen.add(s)
+                    parts.append(s)
+            merged_summary = "; ".join(parts)
+            max_weight = min(max((r.get("weight") or 1.0) for r in ranked) + 0.2, 3.0)
+            now = _utcnow_iso()
+
+            ph = ",".join("?" * len(gone))
+            self.conn.execute(
+                f"UPDATE OR IGNORE memory_edges SET source_id = ? WHERE source_id IN ({ph})",
+                [survivor_id, *gone],
+            )
+            self.conn.execute(
+                f"UPDATE OR IGNORE memory_edges SET target_id = ? WHERE target_id IN ({ph})",
+                [survivor_id, *gone],
+            )
+            self.conn.execute(
+                "UPDATE memories SET summary = ?, merged_from = ?, updated_at = ?, weight = ?, "
+                "consolidation_count = consolidation_count + ? WHERE id = ?",
+                (merged_summary, ",".join(gone), now, max_weight, len(gone), survivor_id),
+            )
+            self.conn.execute(f"DELETE FROM memories WHERE id IN ({ph})", gone)
+            self._drop_vectors(gone)
+            merged_total += len(gone)
+            processed += 1
+
+        if processed:
+            self.conn.execute("DELETE FROM memory_edges WHERE source_id = target_id")
+            self.conn.commit()
+        return {"clusters": processed, "merged": merged_total}
+
     def decay_weights(self, decay_rate: float = 0.95):
         """Apply decay to memory weights. Critical/high memories decay slower;
         recently accessed memories are protected from decay this round."""

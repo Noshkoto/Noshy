@@ -36,3 +36,8 @@ Repository = "https://github.com/noshkoto/Noshy"
 
 [tool.setuptools]
 py-modules = ["store", "extractor", "embed", "server", "hermes_skill", "hooks", "context", "decorator", "noshy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+filterwarnings = ["ignore::DeprecationWarning"]
