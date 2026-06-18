@@ -45,6 +45,8 @@ Noshy gives your AI agent real memory — not note-taking, not context stuffing,
 - **Session hooks** — automatic memory extraction at session end, no manual calls required
 - **Numpy-vectorized cosine** — cluster detection and semantic search are ~50x faster with numpy (optional, pure-Python fallback included)
 - **Rotating request logs** — set `NOSHY_LOG_FILE` or run in a container to get `~/.noshy/noshy.log` (5MB x 3 rotation)
+- **Contradiction detection** — scans memory pairs in a similarity band and asks the LLM whether they conflict; persists confirmed pairs as `contradicts` edges so future recalls warn about them
+- **Async extraction queue** — hand off long transcripts without blocking on the LLM; a periodic sweep drains the queue in the background
 
 ## Hermes vs Noshy
 
@@ -56,6 +58,7 @@ What Noshy adds that Hermes doesn't have by default:
 - **Unbounded storage** — Hermes caps memory at ~3,500 chars. Noshy stores unlimited entries in SQLite.
 - **Richer memory types** — memories (facts/decisions), memoirs (permanent knowledge), and concepts (related ideas linked together). Hermes just has flat text entries.
 - **Graph relationships** — links related memories so recalling one pulls up connected ones.
+- **Contradiction awareness** — Noshy detects when two memories conflict (e.g. opposite preferences, replaced decisions) and surfaces warnings on recall so agents don't act on stale info.
 - **Session context injection** — automatically surfaces what you were working on, recent decisions, and active projects when a session starts.
 - **Decision timeline** — chronological log of what was decided and why, so you can trace back.
 - **Pattern detection** — notices when the same solution keeps coming up and suggests turning it into a skill.
@@ -481,8 +484,10 @@ The schema is compatible — memories, memoirs, concepts, and metadata all trans
 | ICM import | N/A | Built-in |
 | Config | Env vars only | TOML file + env var overrides |
 | Lifecycle | Manual process management | Graceful shutdown, auto-migration, retry |
-| Cosine similarity | Pure Python | Numpy-vectorized (~50x faster), pure-Python fallback |
-| Logs | stdout only | Rotating file logs (5MB x 3) |
+|| Cosine similarity | Pure Python | Numpy-vectorized (~50x faster), pure-Python fallback |
+|| Contradiction detection | None | LLM-powered conflict scan with persistent `contradicts` edges |
+|| Extraction queue | Synchronous only | Async queue with background drain |
+|| Logs | stdout only | Rotating file logs (5MB x 3) |
 | Dashboard auth | None | Token prompt modal, localStorage persistence |
 
 ## Roadmap
@@ -515,6 +520,9 @@ The schema is compatible — memories, memoirs, concepts, and metadata all trans
 - [x] Dashboard auth UI (token prompt modal, localStorage, Forget button)
 - [x] Rotating HTTP request logs (`NOSHY_LOG_FILE`)
 - [x] Input validation and silent-except cleanup
+- [x] Contradiction detection (`noshy_find_contradictions` + `contradicts` edges on recall)
+- [x] Async extraction queue (`noshy_queue_extraction` / `noshy_process_queue`)
+- [x] 56 tests (was 47)
 - [ ] Per-user database isolation (multi-tenant — one DB per token)
 
 ## License
