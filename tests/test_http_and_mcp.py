@@ -182,3 +182,12 @@ def test_health_and_dashboard_remain_public_with_auth(server_with_auth):
     # /health and / are public so tools and humans can probe without a token
     assert _get(port, "/health").status == 200
     assert _get(port, "/").status == 200
+
+
+def test_dashboard_carries_token_prompt_ui(server_with_auth):
+    """When auth is on, the dashboard must include the localStorage-token
+    prompt UI so users can authenticate without setting headers manually."""
+    port, _ = server_with_auth
+    html = _get(port, "/").read().decode()
+    for marker in ("authOv", "authSave", "TOK_KEY", "wireAuth"):
+        assert marker in html, marker

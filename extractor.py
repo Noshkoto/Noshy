@@ -288,12 +288,19 @@ def _call_llm(prompt: str, *, api_base: str = None, api_key: str = None,
     """Call an LLM via OpenAI-compatible API."""
     import urllib.request, urllib.error
 
-    if api_base is None:
-        api_base = os.environ.get("NOSHY_API_BASE", "http://127.0.0.1:8642/v1")
-    if api_key is None:
-        api_key = os.environ.get("NOSHY_API_KEY", os.environ.get("API_SERVER_KEY", ""))
-    if model is None:
-        model = os.environ.get("NOSHY_MODEL", "hermes-agent")
+    if api_base is None or api_key is None or model is None:
+        try:
+            from config import get as _cfg
+            cfg_base = _cfg("api_base"); cfg_key = _cfg("api_key"); cfg_model = _cfg("model")
+        except Exception:
+            cfg_base = cfg_key = cfg_model = None
+        if api_base is None:
+            api_base = cfg_base or os.environ.get("NOSHY_API_BASE", "http://127.0.0.1:8642/v1")
+        if api_key is None:
+            api_key = cfg_key or os.environ.get("NOSHY_API_KEY",
+                                                os.environ.get("API_SERVER_KEY", ""))
+        if model is None:
+            model = cfg_model or os.environ.get("NOSHY_MODEL", "hermes-agent")
 
     body = json.dumps({
         "model": model,

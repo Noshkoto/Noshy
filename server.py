@@ -16,13 +16,32 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from store import NoshyStore, _utcnow_iso as _now_iso
 from extractor import extract_facts, consolidate_memories
-from embed import auto_embedder
 from context import session_context, decision_timeline, detect_patterns, extract_preferences
+
+def _build_log_handlers():
+    """stderr always, plus a 5MB-rotating file handler when NOSHY_LOG_FILE is set
+    (or ~/.noshy/noshy.log on Linux/macOS when stderr isn't a tty). Lets long-
+    running containers log without filling disk."""
+    handlers = [logging.StreamHandler(sys.stderr)]
+    log_path = os.environ.get("NOSHY_LOG_FILE")
+    if not log_path and not sys.stderr.isatty():
+        # Headless run (Docker, systemd) — keep a rotating audit log on disk.
+        log_path = str(Path.home() / ".noshy" / "noshy.log")
+    if log_path:
+        try:
+            from logging.handlers import RotatingFileHandler
+            p = Path(log_path).expanduser()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            handlers.append(RotatingFileHandler(
+                p, maxBytes=5_000_000, backupCount=3, encoding="utf-8"))
+        except Exception:
+            pass  # never let logging setup crash the server
+    return handlers
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[logging.StreamHandler(sys.stderr)],
+    handlers=_build_log_handlers(),
 )
 log = logging.getLogger("aion.server")
 
@@ -241,7 +260,7 @@ def handle_initialize(params: Dict) -> Dict:
     return {
         "protocolVersion": "2024-11-05",
         "capabilities": {"tools": {}},
-        "serverInfo": {"name": "noshy", "version": "0.2.3"},
+        "serverInfo": {"name": "noshy", "version": "0.3.0"},
     }
 
 
@@ -524,9 +543,9 @@ def handle_tools_call(params: Dict) -> Dict:
 def run_stdio(db_path: str = None):
     """Run Noshy as an MCP stdio server."""
     global store
-    embedder = auto_embedder()
-    store = NoshyStore(db_path=db_path, embedder=embedder)
-    log.info(f"Noshy MCP stdio server ready (embed: {type(embedder).__name__})")
+    from store_factory import get_store as _get_shared
+    store = _get_shared(db_path=db_path)
+    log.info(f"Noshy MCP stdio server ready (embed: {type(store.embedder).__name__})")
 
     def _send(payload: Dict):
         sys.stdout.write(json.dumps(payload) + "\n")
@@ -583,805 +602,44 @@ def run_stdio(db_path: str = None):
 
 # ──────────── Web Dashboard ────────────
 
-DASHBOARD_HTML = r"""<!doctype html>
-<html lang="en" data-theme="dark">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Noshy — Memory</title>
-<style>
-/* ── TOKENS — Hyrule palette ───────────────────────── */
-:root {
-  /* Twilight night sky base */
-  --bg:#0e0a24; --surface:rgba(255,255,255,.045); --surface2:rgba(255,255,255,.085);
-  --border:rgba(77,158,255,.13); --border-h:rgba(29,214,111,.55);
-  --text:#ece8d6; --muted:#8a8499; --dim:rgba(255,255,255,.13);
-  /* Rupee emerald + Navi fairy + sunset amber */
-  --accent:#1dd66f; --accent2:#4d9eff;
-  --grad:linear-gradient(135deg,#1dd66f 0%,#4d9eff 55%,#f4a548 100%);
-  --grad-text:linear-gradient(135deg,#5ff09a 0%,#4d9eff 60%,#ffb56b 100%);
-  --glow:0 0 24px rgba(29,214,111,.32);
-  --glow-fairy:0 0 22px rgba(77,158,255,.36);
-  /* Importance — themed */
-  --crit:#ef5a5a; --crit-bg:rgba(239,90,90,.14);     /* Hylian shield red */
-  --high:#f4a548; --high-bg:rgba(244,165,72,.15);    /* sunset amber */
-  --med:#1dd66f;  --med-bg:rgba(29,214,111,.14);     /* rupee green */
-  --low:#7a8590;  --low-bg:rgba(122,133,144,.13);    /* castle stone */
-  --memoir:#4d9eff; --memoir-bg:rgba(77,158,255,.14); /* fairy blue */
-  --danger:#ef5a5a; --overlay:rgba(0,0,0,.78);
-  --r:14px; --rs:8px; --blur:blur(18px);
-  --shadow:0 6px 32px rgba(0,0,0,.55); --tr:.18s ease;
-}
-[data-theme="light"] {
-  /* Sandstone parchment — like the Noshy stone lettering */
-  --bg:#f3e8c8; --surface:rgba(255,255,255,.66); --surface2:rgba(255,255,255,.9);
-  --border:rgba(120,82,40,.16); --border-h:rgba(0,170,90,.55);
-  --text:#2a1e0e; --muted:#75634a; --dim:rgba(0,0,0,.08);
-  --accent:#00aa5a; --accent2:#2d72d4;
-  --grad:linear-gradient(135deg,#00aa5a 0%,#2d72d4 55%,#d97706 100%);
-  --grad-text:linear-gradient(135deg,#008f4c 0%,#2563c0 55%,#b45309 100%);
-  --glow:0 0 22px rgba(0,170,90,.22);
-  --glow-fairy:0 0 20px rgba(45,114,212,.22);
-  --crit:#c93d3d; --crit-bg:rgba(201,61,61,.1);
-  --high:#d97706; --high-bg:rgba(217,119,6,.1);
-  --med:#00aa5a;  --med-bg:rgba(0,170,90,.1);
-  --low:#8a7a6a;  --low-bg:rgba(138,122,106,.12);
-  --memoir:#2d72d4; --memoir-bg:rgba(45,114,212,.1);
-  --danger:#c93d3d; --overlay:rgba(0,0,0,.42);
-  --shadow:0 6px 32px rgba(101,73,40,.2);
-}
-/* ── RESET ──────────────────────────────────────────── */
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-html{height:100%}
-body{background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden;
-  font:15px/1.55 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
-  background-image:radial-gradient(ellipse at top left,rgba(77,158,255,.08) 0%,transparent 50%),
-    radial-gradient(ellipse at bottom right,rgba(244,165,72,.06) 0%,transparent 50%);
-  background-attachment:fixed;}
-[data-theme="light"] body{
-  background-image:radial-gradient(ellipse at top left,rgba(45,114,212,.07) 0%,transparent 55%),
-    radial-gradient(ellipse at bottom right,rgba(217,119,6,.08) 0%,transparent 55%);}
-button{cursor:pointer;font-family:inherit;border:none;background:none;}
-input,select{font-family:inherit;outline:none;}
-/* ── BACKGROUND ART ─────────────────────────────────── */
-.bg-art{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden;}
-.orb{position:absolute;border-radius:50%;filter:blur(90px);
-  animation:float 14s ease-in-out infinite;}
-/* Rupee glow (top-left) */
-.orb-1{width:640px;height:520px;opacity:.32;
-  background:radial-gradient(circle,rgba(29,214,111,.7) 0%,transparent 70%);
-  top:-18%;left:-8%;animation-delay:0s;}
-/* Fairy glow (right) */
-.orb-2{width:500px;height:620px;opacity:.26;
-  background:radial-gradient(circle,rgba(77,158,255,.7) 0%,transparent 70%);
-  top:28%;right:-6%;animation-delay:-6s;}
-/* Sunset glow (bottom) */
-.orb-3{width:480px;height:480px;opacity:.22;
-  background:radial-gradient(circle,rgba(244,165,72,.65) 0%,transparent 70%);
-  bottom:-14%;left:38%;animation-delay:-11s;}
-[data-theme="light"] .orb-1{opacity:.18;background:radial-gradient(circle,rgba(0,170,90,.55) 0%,transparent 70%);}
-[data-theme="light"] .orb-2{opacity:.14;background:radial-gradient(circle,rgba(45,114,212,.5) 0%,transparent 70%);}
-[data-theme="light"] .orb-3{opacity:.18;background:radial-gradient(circle,rgba(217,119,6,.55) 0%,transparent 70%);}
-@keyframes float{
-  0%,100%{transform:translate(0,0) scale(1);}
-  33%{transform:translate(22px,-28px) scale(1.04);}
-  66%{transform:translate(-16px,18px) scale(.97);}
-}
-.bg-grid{position:fixed;inset:0;z-index:0;pointer-events:none;
-  background-image:linear-gradient(rgba(77,158,255,.025) 1px,transparent 1px),
-    linear-gradient(90deg,rgba(77,158,255,.025) 1px,transparent 1px);
-  background-size:44px 44px;}
-[data-theme="light"] .bg-grid{
-  background-image:linear-gradient(rgba(120,82,40,.06) 1px,transparent 1px),
-    linear-gradient(90deg,rgba(120,82,40,.06) 1px,transparent 1px);}
-/* ── LAYOUT ─────────────────────────────────────────── */
-#app{position:relative;z-index:1;display:flex;flex-direction:column;min-height:100vh;}
-/* ── HEADER ─────────────────────────────────────────── */
-header{position:sticky;top:0;z-index:50;height:62px;
-  backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
-  background:rgba(14,10,36,.85);border-bottom:1px solid var(--border);
-  padding:0 26px;display:flex;align-items:center;gap:12px;}
-[data-theme="light"] header{background:rgba(243,232,200,.88);}
-.logo{display:flex;align-items:center;gap:10px;text-decoration:none;}
-.logo-icon{width:32px;height:32px;background:var(--grad);border-radius:9px;
-  display:flex;align-items:center;justify-content:center;
-  box-shadow:0 0 20px rgba(29,214,111,.4),0 0 10px rgba(77,158,255,.3);
-  flex-shrink:0;}
-.logo-icon svg{width:18px;height:18px;}
-.logo-name{font-size:18px;font-weight:780;letter-spacing:-.025em;
-  background:var(--grad-text);-webkit-background-clip:text;
-  -webkit-text-fill-color:transparent;background-clip:text;}
-.logo-ver{background:var(--surface2);border:1px solid var(--border);
-  border-radius:999px;padding:2px 8px;font-size:11px;color:var(--muted);
-  display:none;}
-@media(min-width:520px){.logo-ver{display:block;}}
-.hgap{flex:1;}
-.status-pill{display:flex;align-items:center;gap:7px;background:var(--surface);
-  border:1px solid var(--border);border-radius:999px;padding:5px 12px;
-  font-size:12px;color:var(--muted);}
-.sdot{width:7px;height:7px;border-radius:50%;background:var(--med);
-  animation:pulse-dot 2.6s ease-in-out infinite;}
-@keyframes pulse-dot{0%,100%{box-shadow:0 0 5px var(--med);}
-  50%{box-shadow:0 0 13px var(--med),0 0 4px var(--med);}}
-/* ── PROJECT PICKER (custom dropdown) ── */
-.proj-picker{position:relative;}
-.proj-trigger{display:flex;align-items:center;gap:8px;background:var(--surface);
-  border:1px solid var(--border);border-radius:var(--rs);padding:7px 11px;
-  color:var(--text);font-size:13px;font-weight:500;cursor:pointer;
-  transition:all var(--tr);min-width:140px;max-width:200px;
-  font-family:inherit;}
-.proj-trigger:hover{background:var(--surface2);border-color:var(--border-h);}
-.proj-trigger .lbl{flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;
-  white-space:nowrap;}
-.proj-trigger .chev{width:11px;height:11px;transition:transform .2s ease;
-  color:var(--muted);flex-shrink:0;}
-.proj-picker.open .proj-trigger{border-color:var(--border-h);color:var(--accent);
-  background:var(--surface2);box-shadow:var(--glow);}
-.proj-picker.open .chev{transform:rotate(180deg);color:var(--accent);}
-.proj-menu{position:absolute;top:calc(100% + 6px);right:0;
-  min-width:240px;max-height:360px;overflow-y:auto;
-  background:rgba(15,17,25,.94);backdrop-filter:var(--blur);
-  -webkit-backdrop-filter:var(--blur);
-  border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);
-  padding:6px;z-index:80;opacity:0;transform:translateY(-6px) scale(.98);
-  pointer-events:none;transform-origin:top right;
-  transition:opacity .16s ease,transform .16s ease;}
-[data-theme="light"] .proj-menu{background:rgba(255,255,255,.97);}
-.proj-picker.open .proj-menu{opacity:1;transform:translateY(0) scale(1);
-  pointer-events:auto;}
-.proj-menu::-webkit-scrollbar{width:8px;}
-.proj-menu::-webkit-scrollbar-track{background:transparent;}
-.proj-menu::-webkit-scrollbar-thumb{background:var(--dim);border-radius:8px;}
-.proj-opt{display:flex;align-items:center;gap:10px;padding:9px 12px;
-  border-radius:8px;cursor:pointer;font-size:13px;color:var(--text);
-  transition:background .12s;position:relative;}
-.proj-opt:hover{background:var(--surface2);}
-.proj-opt.sel{background:linear-gradient(135deg,rgba(29,214,111,.16) 0%,rgba(77,158,255,.16) 100%);
-  color:var(--accent);font-weight:600;}
-.proj-opt.sel::before{content:'';position:absolute;left:4px;top:50%;
-  transform:translateY(-50%);width:3px;height:18px;border-radius:2px;
-  background:var(--grad);box-shadow:0 0 8px rgba(29,214,111,.55);}
-.proj-opt .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-  padding-left:6px;}
-.proj-opt .ct{font-size:11px;color:var(--muted);background:var(--surface);
-  border-radius:999px;padding:1px 8px;font-weight:600;letter-spacing:.02em;
-  flex-shrink:0;}
-.proj-opt.sel .ct{background:rgba(29,214,111,.22);color:var(--accent);}
-.proj-menu-divider{height:1px;background:var(--border);margin:5px 8px;}
-.proj-menu-empty{padding:14px 12px;text-align:center;color:var(--muted);font-size:12px;}
-.hdr-btn{display:flex;align-items:center;gap:6px;background:var(--surface);
-  border:1px solid var(--border);border-radius:var(--rs);padding:7px 12px;
-  color:var(--text);font-size:13px;transition:all var(--tr);}
-.hdr-btn svg{width:14px;height:14px;flex-shrink:0;}
-.hdr-btn:hover{background:var(--surface2);border-color:var(--border-h);
-  color:var(--accent);box-shadow:var(--glow);}
-.hdr-btn.ico{padding:7px;}
-/* ── MAIN ───────────────────────────────────────────── */
-main{max-width:1060px;margin:0 auto;width:100%;padding:26px 22px 64px;}
-/* ── STATS ──────────────────────────────────────────── */
-.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));
-  gap:12px;margin-bottom:22px;}
-.stat-card{background:var(--surface);border:1px solid var(--border);
-  border-radius:var(--r);padding:18px 18px 14px;
-  backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
-  transition:all var(--tr);position:relative;overflow:hidden;}
-.stat-card::after{content:'';position:absolute;top:0;left:0;right:0;height:2px;
-  background:var(--grad);opacity:0;transition:opacity var(--tr);}
-.stat-card:hover{border-color:var(--border-h);transform:translateY(-2px);
-  box-shadow:var(--shadow);}
-.stat-card:hover::after{opacity:1;}
-.si{width:34px;height:34px;border-radius:9px;background:var(--surface2);
-  border:1px solid var(--border);display:flex;align-items:center;
-  justify-content:center;margin-bottom:11px;color:var(--accent);}
-.si svg{width:16px;height:16px;}
-.sv{font-size:28px;font-weight:760;letter-spacing:-.045em;line-height:1;
-  background:var(--grad);-webkit-background-clip:text;
-  -webkit-text-fill-color:transparent;background-clip:text;}
-.sl{font-size:11px;color:var(--muted);text-transform:uppercase;
-  letter-spacing:.07em;margin-top:4px;}
-/* ── SEARCH ─────────────────────────────────────────── */
-.search-wrap{display:flex;gap:9px;align-items:stretch;
-  margin-bottom:18px;flex-wrap:wrap;}
-.search-field{flex:1;min-width:210px;position:relative;display:flex;}
-.search-field svg{position:absolute;left:13px;top:50%;
-  transform:translateY(-50%);color:var(--muted);width:15px;height:15px;}
-.search-field input{width:100%;background:var(--surface);
-  border:1px solid var(--border);border-radius:var(--rs);
-  padding:10px 13px 10px 38px;color:var(--text);font-size:14px;
-  transition:all var(--tr);}
-.search-field input::placeholder{color:var(--muted);}
-.search-field input:focus{border-color:var(--accent);background:var(--surface2);
-  box-shadow:0 0 0 3px rgba(29,214,111,.18),0 0 18px rgba(29,214,111,.12);}
-.btn-p{display:inline-flex;align-items:center;gap:6px;
-  background:var(--grad);border-radius:var(--rs);padding:10px 17px;
-  color:#fff;font-size:14px;font-weight:620;white-space:nowrap;
-  transition:all var(--tr);}
-.btn-p:hover{filter:brightness(1.1);box-shadow:var(--glow);transform:translateY(-1px);}
-.btn-p:active{transform:none;}
-.btn-g{display:inline-flex;align-items:center;gap:6px;
-  background:var(--surface);border:1px solid var(--border);
-  border-radius:var(--rs);padding:10px 15px;color:var(--text);
-  font-size:14px;white-space:nowrap;transition:all var(--tr);}
-.btn-g:hover{background:var(--surface2);border-color:var(--border-h);}
-.btn-d{display:inline-flex;align-items:center;gap:6px;
-  background:var(--crit-bg);border:1px solid rgba(239,68,68,.28);
-  border-radius:var(--rs);padding:9px 14px;color:var(--crit);
-  font-size:13px;transition:all var(--tr);}
-.btn-d:hover{background:rgba(239,68,68,.22);}
-.btn-sm{padding:6px 11px;font-size:13px;}
-/* ── SECTION ROW ────────────────────────────────────── */
-.sec-row{display:flex;align-items:center;gap:9px;margin:2px 0 13px;}
-.sec-title{font-size:11px;font-weight:720;text-transform:uppercase;
-  letter-spacing:.08em;color:var(--muted);}
-.sec-chip{background:var(--surface2);border:1px solid var(--border);
-  border-radius:999px;padding:2px 9px;font-size:11px;color:var(--muted);}
-/* ── MEMORY CARDS ───────────────────────────────────── */
-.mem-list{display:flex;flex-direction:column;gap:8px;}
-.mem{background:var(--surface);border:1px solid var(--border);
-  border-radius:var(--r);padding:13px 15px;
-  display:flex;gap:13px;align-items:flex-start;
-  backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
-  transition:all var(--tr);position:relative;overflow:hidden;}
-.mem::before{content:'';position:absolute;left:0;top:0;bottom:0;
-  width:3px;border-radius:3px 0 0 3px;}
-.mem.ic::before{background:var(--crit);}
-.mem.ih::before{background:var(--high);}
-.mem.im::before{background:var(--med);}
-.mem.il::before{background:var(--low);}
-.mem.io::before{background:var(--memoir);}
-.mem:hover{border-color:var(--border-h);transform:translateX(3px);
-  box-shadow:var(--shadow);}
-.mem:hover .mdel{opacity:1;transform:scale(1);}
-.badge{flex:none;font-size:10px;font-weight:720;padding:3px 9px;
-  border-radius:999px;text-transform:uppercase;letter-spacing:.04em;
-  margin-top:1px;white-space:nowrap;}
-.b-critical{background:var(--crit-bg);color:var(--crit);
-  box-shadow:0 0 8px rgba(239,68,68,.18);}
-.b-high{background:var(--high-bg);color:var(--high);
-  box-shadow:0 0 8px rgba(245,158,11,.14);}
-.b-medium{background:var(--med-bg);color:var(--med);}
-.b-low{background:var(--low-bg);color:var(--low);}
-.b-memoir{background:var(--memoir-bg);color:var(--memoir);}
-.mbody{flex:1;min-width:0;}
-.mtopic{font-weight:650;font-size:14px;}
-.msum{color:var(--muted);margin-top:3px;font-size:13.5px;
-  line-height:1.5;word-break:break-word;}
-.mmeta{color:var(--dim);font-size:11px;margin-top:6px;
-  display:flex;gap:8px;flex-wrap:wrap;}
-.mdel{opacity:0;transform:scale(.82);flex:none;
-  width:30px;height:30px;display:flex;align-items:center;
-  justify-content:center;border-radius:var(--rs);
-  border:1px solid transparent;color:var(--danger);
-  transition:all var(--tr);align-self:flex-start;background:transparent;}
-.mdel:hover{background:var(--crit-bg);border-color:rgba(239,68,68,.3);}
-.mdel svg{width:14px;height:14px;}
-/* ── EMPTY / SKELETON ───────────────────────────────── */
-.empty-state{text-align:center;padding:56px 20px;color:var(--muted);}
-.empty-state svg{width:44px;height:44px;color:var(--dim);
-  margin:0 auto 14px;display:block;}
-.empty-state p{font-size:15px;margin-bottom:4px;}
-.empty-state small{font-size:13px;color:var(--dim);}
-.skel{background:var(--surface);border:1px solid var(--border);
-  border-radius:var(--r);padding:16px 15px;margin-bottom:8px;}
-.sl-line{height:11px;border-radius:4px;
-  background:linear-gradient(90deg,var(--surface2) 25%,var(--surface) 50%,var(--surface2) 75%);
-  background-size:400% 100%;animation:shimmer 1.7s infinite;}
-.sl-line+.sl-line{margin-top:9px;}
-@keyframes shimmer{0%{background-position:100% 0}100%{background-position:-100% 0}}
-/* ── MODAL ──────────────────────────────────────────── */
-.moverlay{position:fixed;inset:0;background:var(--overlay);display:none;
-  align-items:center;justify-content:center;padding:20px;z-index:200;
-  backdrop-filter:blur(5px);-webkit-backdrop-filter:blur(5px);}
-.moverlay.open{display:flex;}
-.mcard{background:var(--bg);border:1px solid var(--border);border-radius:18px;
-  max-width:680px;width:100%;max-height:82vh;display:flex;flex-direction:column;
-  box-shadow:0 28px 90px rgba(0,0,0,.65);animation:min .22s ease;overflow:hidden;}
-@keyframes min{from{opacity:0;transform:scale(.94) translateY(10px);}
-  to{opacity:1;transform:none;}}
-.mhd{padding:18px 22px 15px;border-bottom:1px solid var(--border);
-  display:flex;align-items:center;justify-content:space-between;}
-.mhd h3{font-size:15px;font-weight:650;}
-.mclose{width:28px;height:28px;display:flex;align-items:center;
-  justify-content:center;background:var(--surface);border:1px solid var(--border);
-  border-radius:7px;color:var(--muted);font-size:17px;transition:all var(--tr);}
-.mclose:hover{color:var(--text);border-color:var(--border-h);}
-.mbod{flex:1;overflow-y:auto;padding:18px 22px;}
-.mft{padding:14px 22px;border-top:1px solid var(--border);
-  display:flex;justify-content:flex-end;gap:9px;}
-.clu-card{background:var(--surface);border:1px solid var(--border);
-  border-radius:var(--r);margin-bottom:9px;overflow:hidden;}
-.clu-head{padding:11px 15px;display:flex;align-items:center;gap:9px;
-  border-bottom:1px solid var(--border);background:var(--surface2);}
-.clu-num{background:var(--grad);color:#fff;border-radius:999px;
-  width:21px;height:21px;display:flex;align-items:center;justify-content:center;
-  font-size:10px;font-weight:720;flex-shrink:0;}
-.clu-ttl{font-weight:620;font-size:13px;flex:1;}
-.clu-cnt{font-size:11px;color:var(--muted);background:var(--surface);
-  border:1px solid var(--border);border-radius:999px;padding:1px 8px;}
-.clu-item{padding:9px 15px;border-bottom:1px solid var(--border);font-size:12.5px;}
-.clu-item:last-child{border-bottom:none;}
-.clu-item strong{color:var(--text);}
-.clu-item span{color:var(--muted);}
-/* ── CONFIRM ────────────────────────────────────────── */
-.cov{position:fixed;inset:0;z-index:300;background:var(--overlay);display:none;
-  align-items:center;justify-content:center;padding:20px;
-  backdrop-filter:blur(5px);-webkit-backdrop-filter:blur(5px);}
-.cov.open{display:flex;}
-.ccard{background:var(--bg);border:1px solid var(--border);border-radius:16px;
-  padding:26px 26px 22px;max-width:360px;width:100%;
-  box-shadow:0 28px 80px rgba(0,0,0,.55);animation:min .2s ease;}
-.ccard h4{font-size:16px;margin-bottom:7px;}
-.ccard p{font-size:13.5px;color:var(--muted);line-height:1.5;margin-bottom:18px;}
-.cacts{display:flex;gap:9px;justify-content:flex-end;}
-/* ── TOASTS ─────────────────────────────────────────── */
-#tc{position:fixed;bottom:22px;right:22px;z-index:500;
-  display:flex;flex-direction:column;gap:7px;pointer-events:none;}
-.toast{background:var(--surface2);border:1px solid var(--border);border-radius:10px;
-  padding:11px 15px;font-size:13.5px;
-  backdrop-filter:var(--blur);-webkit-backdrop-filter:var(--blur);
-  box-shadow:var(--shadow);pointer-events:all;
-  display:flex;align-items:center;gap:9px;
-  min-width:220px;max-width:360px;animation:tin .23s ease;}
-@keyframes tin{from{opacity:0;transform:translateX(14px);}to{opacity:1;transform:none;}}
-.toast.ok{border-color:rgba(16,185,129,.35);}
-.toast.err{border-color:rgba(239,68,68,.35);}
-.tico{width:15px;height:15px;flex-shrink:0;}
-.toast.ok .tico{color:var(--med);}
-.toast.err .tico{color:var(--crit);}
-/* ── SCROLLBAR ──────────────────────────────────────── */
-::-webkit-scrollbar{width:5px;height:5px;}
-::-webkit-scrollbar-track{background:transparent;}
-::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px;}
-::-webkit-scrollbar-thumb:hover{background:var(--muted);}
-</style>
-</head>
-<body>
-<div class="bg-art" aria-hidden="true">
-  <div class="orb orb-1"></div><div class="orb orb-2"></div><div class="orb orb-3"></div>
-</div>
-<div class="bg-grid" aria-hidden="true"></div>
-<div id="app">
+def _dashboard_candidates() -> List[Path]:
+    """Where to look for dashboard.html. First match wins.
 
-<!-- HEADER -->
-<header>
-  <div class="logo">
-    <div class="logo-icon">
-      <svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <circle cx="3.5" cy="7" r="2.2" fill="white" opacity=".92"/>
-        <circle cx="9" cy="3.5" r="2.2" fill="white" opacity=".92"/>
-        <circle cx="14.5" cy="7" r="2.2" fill="white" opacity=".92"/>
-        <circle cx="6" cy="13" r="2.2" fill="white" opacity=".92"/>
-        <circle cx="12" cy="13" r="2.2" fill="white" opacity=".92"/>
-        <line x1="3.5" y1="7" x2="9" y2="3.5" stroke="white" stroke-width="1.1" opacity=".45"/>
-        <line x1="9" y1="3.5" x2="14.5" y2="7" stroke="white" stroke-width="1.1" opacity=".45"/>
-        <line x1="3.5" y1="7" x2="6" y2="13" stroke="white" stroke-width="1.1" opacity=".45"/>
-        <line x1="14.5" y1="7" x2="12" y2="13" stroke="white" stroke-width="1.1" opacity=".45"/>
-        <line x1="6" y1="13" x2="12" y2="13" stroke="white" stroke-width="1.1" opacity=".45"/>
-        <line x1="9" y1="3.5" x2="6" y2="13" stroke="white" stroke-width="1.1" opacity=".25"/>
-        <line x1="9" y1="3.5" x2="12" y2="13" stroke="white" stroke-width="1.1" opacity=".25"/>
-        <line x1="3.5" y1="7" x2="14.5" y2="7" stroke="white" stroke-width="1.1" opacity=".25"/>
-      </svg>
-    </div>
-    <span class="logo-name">noshy</span>
-    <span class="logo-ver">v0.2.0</span>
-  </div>
-  <div class="hgap"></div>
-  <div class="status-pill"><span class="sdot"></span><span>Live</span></div>
-  <div class="proj-picker" id="projPicker">
-    <button class="proj-trigger" id="projTrigger" type="button"
-            aria-haspopup="listbox" aria-expanded="false" aria-label="Filter by project">
-      <span class="lbl">All projects</span>
-      <svg class="chev" viewBox="0 0 12 12" fill="none" stroke="currentColor"
-           stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M3 4.5l3 3 3-3"/>
-      </svg>
-    </button>
-    <div class="proj-menu" id="projMenu" role="listbox"></div>
-  </div>
-  <input type="hidden" id="projectFilter" value="">
-  <button class="hdr-btn" id="clusterBtn">
-    <svg viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5">
-      <circle cx="4" cy="4" r="2"/><circle cx="11" cy="4" r="2"/>
-      <circle cx="4" cy="11" r="2"/><circle cx="11" cy="11" r="2"/>
-      <path d="M6 4h3M7.5 6v3M4 6v2M11 6v2M6 11h3"/>
-    </svg>
-    Clusters
-  </button>
-  <button class="hdr-btn ico" id="themeBtn" aria-label="Toggle theme">
-    <svg id="themeIco" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5">
-      <circle cx="7.5" cy="7.5" r="3"/>
-      <path d="M7.5 1v1.5M7.5 12.5V14M1 7.5h1.5M12.5 7.5H14M3.2 3.2l1 1M10.8 10.8l1 1M3.2 11.8l1-1M10.8 4.2l1-1"/>
-    </svg>
-  </button>
-</header>
+    - dev / source checkout: sibling of this server.py
+    - pip wheel install: <sys.prefix>/share/noshy/dashboard.html
+      (matches [tool.setuptools.data-files] in pyproject.toml)
+    - last-resort user override: ~/.noshy/dashboard.html
+    """
+    return [
+        Path(__file__).parent / "dashboard.html",
+        Path(sys.prefix) / "share" / "noshy" / "dashboard.html",
+        Path.home() / ".noshy" / "dashboard.html",
+    ]
 
-<!-- MAIN -->
-<main>
-  <!-- Stats -->
-  <div class="stats-grid">
-    <div class="stat-card">
-      <div class="si"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
-        <path d="M8 2C5.2 2 3 4.2 3 7c0 1.9 1 3.6 2.6 4.5V13h4.8v-1.5C12 10.6 13 8.9 13 7c0-2.8-2.2-5-5-5z"/>
-        <path d="M5.5 13h5"/></svg></div>
-      <div class="sv" id="s-mem">—</div><div class="sl">Memories</div>
-    </div>
-    <div class="stat-card">
-      <div class="si"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
-        <rect x="2" y="2" width="12" height="12" rx="1.5"/>
-        <path d="M5 6h6M5 9h4"/></svg></div>
-      <div class="sv" id="s-moir">—</div><div class="sl">Memoirs</div>
-    </div>
-    <div class="stat-card">
-      <div class="si"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
-        <circle cx="8" cy="8" r="5.5"/><circle cx="8" cy="8" r="1.8"/>
-        <path d="M8 2.5v1.2M8 12.3v1.2M2.5 8h1.2M12.3 8h1.2"/></svg></div>
-      <div class="sv" id="s-con">—</div><div class="sl">Concepts</div>
-    </div>
-    <div class="stat-card">
-      <div class="si"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
-        <circle cx="3.5" cy="8" r="2"/><circle cx="12.5" cy="8" r="2"/>
-        <circle cx="8" cy="3.5" r="2"/><circle cx="8" cy="12.5" r="2"/>
-        <path d="M5.4 8h5.2M8 5.4v5.2"/></svg></div>
-      <div class="sv" id="s-edg">—</div><div class="sl">Edges</div>
-    </div>
-    <div class="stat-card">
-      <div class="si"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
-        <path d="M2 12 L5 7 L8 9.5 L11 5 L14 8"/>
-        <path d="M2 14h12"/></svg></div>
-      <div class="sv" id="s-wt">—</div><div class="sl">Avg Weight</div>
-    </div>
-  </div>
 
-  <!-- Search -->
-  <div class="search-wrap">
-    <div class="search-field">
-      <svg viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.6">
-        <circle cx="6.5" cy="6.5" r="4.5"/><path d="M10 10l3 3"/></svg>
-      <input id="q" type="text" placeholder="Search memories &amp; memoirs…"
-        autocomplete="off" spellcheck="false">
-    </div>
-    <button class="btn-p" id="searchBtn" onclick="search()">
-      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" style="width:13px;height:13px">
-        <circle cx="6" cy="6" r="4"/><path d="M9 9l3 3"/></svg>
-      Search
-    </button>
-    <button class="btn-g" onclick="clearSearch()">Clear</button>
-  </div>
+def _load_dashboard_html() -> str:
+    """Read and cache the dashboard HTML from disk on first use."""
+    try:
+        return _load_dashboard_html._cache
+    except AttributeError:
+        pass
+    html = None
+    for p in _dashboard_candidates():
+        try:
+            html = p.read_text(encoding="utf-8")
+            break
+        except (FileNotFoundError, OSError):
+            continue
+    if html is None:
+        html = ("<!doctype html><meta charset=utf-8><title>Noshy</title>"
+                "<p style=\"font-family:sans-serif;padding:2em\">"
+                "dashboard.html is missing from this install — reinstall noshy "
+                "or copy dashboard.html into ~/.noshy/ to override.</p>")
+    _load_dashboard_html._cache = html
+    return html
 
-  <!-- Section header -->
-  <div class="sec-row">
-    <span class="sec-title" id="listTitle">Recent memories</span>
-    <span class="sec-chip" id="secChip" style="display:none"></span>
-  </div>
-
-  <!-- Memory list -->
-  <div id="list" class="mem-list"></div>
-</main>
-</div>
-
-<!-- CLUSTERS MODAL -->
-<div class="moverlay" id="clusterModal"
-  onclick="if(event.target.id==='clusterModal')closeClusters()">
-  <div class="mcard">
-    <div class="mhd">
-      <h3>Near-Duplicate Clusters</h3>
-      <button class="mclose" onclick="closeClusters()" aria-label="Close">&#x2715;</button>
-    </div>
-    <div class="mbod" id="clusterBody">
-      <div class="empty-state"><p>Scanning…</p></div>
-    </div>
-    <div class="mft">
-      <button class="btn-g btn-sm" onclick="closeClusters()">Close</button>
-      <button class="btn-p btn-sm" id="consolidateBtn" onclick="runConsolidate()"
-        style="display:none">Consolidate all</button>
-    </div>
-  </div>
-</div>
-
-<!-- CONFIRM DIALOG -->
-<div class="cov" id="confirmOv">
-  <div class="ccard">
-    <h4 id="cfTitle">Are you sure?</h4>
-    <p id="cfMsg"></p>
-    <div class="cacts">
-      <button class="btn-g btn-sm" id="cfNo">Cancel</button>
-      <button class="btn-d btn-sm" id="cfYes">Delete</button>
-    </div>
-  </div>
-</div>
-
-<!-- TOASTS -->
-<div id="tc"></div>
-
-<script>
-const $=id=>document.getElementById(id);
-const esc=s=>(s==null?'':String(s)).replace(/[&<>"']/g,c=>
-  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-
-/* ── theme ─────────────────────────────────────────── */
-const sunSVG=`<svg viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5">
-  <circle cx="7.5" cy="7.5" r="3"/>
-  <path d="M7.5 1v1.5M7.5 12.5V14M1 7.5h1.5M12.5 7.5H14M3.2 3.2l1 1M10.8 10.8l1 1M3.2 11.8l1-1M10.8 4.2l1-1"/>
-</svg>`;
-const moonSVG=`<svg viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5">
-  <path d="M11.5 10A6 6 0 015 3.5a6 6 0 100 9 6 6 0 006.5-2.5z"/>
-</svg>`;
-function applyTheme(t){
-  document.documentElement.setAttribute('data-theme',t);
-  $('themeBtn').innerHTML=t==='dark'?sunSVG:moonSVG;
-  try{localStorage.setItem('noshy.theme',t);}catch(_){}
-}
-(function(){
-  let t;try{t=localStorage.getItem('noshy.theme');}catch(_){}
-  if(!t)t=window.matchMedia('(prefers-color-scheme:light)').matches?'light':'dark';
-  applyTheme(t);
-})();
-$('themeBtn').addEventListener('click',()=>{
-  applyTheme(document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark');
-});
-
-/* ── toasts ─────────────────────────────────────────── */
-function toast(msg,type='ok',ms=3200){
-  const iko=type==='ok'
-    ?`<svg class="tico" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 7l3.5 3.5L12 3.5"/></svg>`
-    :`<svg class="tico" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 3l8 8M11 3l-8 8"/></svg>`;
-  const el=document.createElement('div');
-  el.className=`toast ${type}`;
-  el.innerHTML=iko+`<span>${esc(msg)}</span>`;
-  $('tc').prepend(el);
-  setTimeout(()=>{el.style.cssText='opacity:0;transform:translateX(12px);transition:all .28s ease;';
-    setTimeout(()=>el.remove(),290);},ms);
-}
-
-/* ── confirm ─────────────────────────────────────────── */
-function confirm2(title,msg){
-  return new Promise(res=>{
-    $('cfTitle').textContent=title;$('cfMsg').textContent=msg;
-    $('confirmOv').classList.add('open');
-    const no=$('cfNo'),yes=$('cfYes');
-    function done(v){
-      $('confirmOv').classList.remove('open');
-      no.removeEventListener('click',onNo);yes.removeEventListener('click',onYes);
-      res(v);
-    }
-    const onNo=()=>done(false),onYes=()=>done(true);
-    no.addEventListener('click',onNo);yes.addEventListener('click',onYes);
-  });
-}
-
-/* ── stats ─────────────────────────────────────────── */
-function animN(el,to){
-  const from=parseInt(el.textContent)||0,diff=to-from;
-  if(!diff){el.textContent=to;return;}
-  const dur=380,t0=performance.now();
-  const tick=now=>{
-    const p=Math.min(1,(now-t0)/dur);
-    el.textContent=Math.round(from+diff*(p<.5?2*p*p:-1+(4-2*p)*p));
-    if(p<1)requestAnimationFrame(tick);
-  };
-  requestAnimationFrame(tick);
-}
-async function loadStats(){
-  try{
-    const s=await(await fetch('/stats')).json();
-    animN($('s-mem'),s.memory_count||0);animN($('s-moir'),s.memoir_count||0);
-    animN($('s-con'),s.concept_count||0);animN($('s-edg'),s.edge_count||0);
-    $('s-wt').textContent=(s.avg_weight||0).toFixed(2);
-  }catch(e){console.error('stats',e);}
-}
-
-/* ── project picker (custom dropdown) ─────────────────── */
-let _projects=[];
-const projPicker=$('projPicker'),projTrigger=$('projTrigger'),projMenu=$('projMenu');
-function openProj(){projPicker.classList.add('open');projTrigger.setAttribute('aria-expanded','true');}
-function closeProj(){projPicker.classList.remove('open');projTrigger.setAttribute('aria-expanded','false');}
-projTrigger.addEventListener('click',e=>{
-  e.stopPropagation();
-  projPicker.classList.contains('open')?closeProj():openProj();
-});
-document.addEventListener('click',e=>{if(!projPicker.contains(e.target))closeProj();});
-document.addEventListener('keydown',e=>{if(e.key==='Escape')closeProj();});
-
-function renderProjMenu(){
-  const cur=$('projectFilter').value;
-  const total=_projects.reduce((s,p)=>s+(p.memory_count||0),0);
-  const items=[{v:'',n:'All projects',c:total}]
-    .concat(_projects.map(p=>({v:p.project,n:p.project,c:p.memory_count})));
-  if(!_projects.length){
-    projMenu.innerHTML='<div class="proj-menu-empty">No projects yet</div>';
-    return;
-  }
-  projMenu.innerHTML=items.map((o,i)=>{
-    const sel=o.v===cur?' sel':'';
-    const div=i===1?'<div class="proj-menu-divider"></div>':'';
-    return div+`<div class="proj-opt${sel}" data-v="${esc(o.v)}" role="option">`+
-      `<span class="nm">${esc(o.n)}</span>`+
-      `<span class="ct">${o.c||0}</span></div>`;
-  }).join('');
-  projMenu.querySelectorAll('.proj-opt').forEach(el=>{
-    el.addEventListener('click',()=>{
-      const v=el.dataset.v;
-      $('projectFilter').value=v;
-      projTrigger.querySelector('.lbl').textContent=el.querySelector('.nm').textContent;
-      projMenu.querySelectorAll('.proj-opt').forEach(o=>o.classList.remove('sel'));
-      el.classList.add('sel');
-      closeProj();
-      $('q').value?search():loadRecent();
-    });
-  });
-}
-
-async function loadProjects(){
-  try{
-    const r=await(await fetch('/projects')).json();
-    _projects=r.projects||[];
-    renderProjMenu();
-  }catch(_){}
-}
-
-/* ── render ─────────────────────────────────────────── */
-function impCls(imp){
-  const i=(imp||'medium').toLowerCase();
-  return {critical:'ic',high:'ih',medium:'im',low:'il',memoir:'io'}[i]||'im';
-}
-function render(items){
-  $('secChip').style.display=items.length?'':'none';
-  if(items.length)$('secChip').textContent=items.length+(items.length===1?' result':' results');
-  if(!items.length){
-    $('list').innerHTML=`<div class="empty-state">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-        <circle cx="11" cy="11" r="7"/><path d="M16.5 16.5l4 4"/>
-        <path d="M8 11h6M11 8v6"/>
-      </svg>
-      <p>No memories found</p>
-      <small>Try a different query or store some memories first.</small>
-    </div>`;
-    return;
-  }
-  $('list').innerHTML=items.map(m=>{
-    const imp=(m._kind==='memoir'||m.importance==='memoir')?'memoir':(m.importance||'medium').toLowerCase();
-    const when=(m.created_at||'').slice(0,10);
-    const proj=m.project&&m.project!=='default'?m.project:'';
-    const w=m.weight!=null?Number(m.weight).toFixed(2):'';
-    const topic=m.topic||m.title||'(untitled)';
-    const summary=m.summary||m.content||'';
-    const meta=[];
-    if(when)meta.push(`<svg viewBox="0 0 11 11" fill="none" stroke="currentColor" stroke-width="1.4" style="width:9px;height:9px"><rect x="1" y="1.5" width="9" height="8.5" rx="1.2"/><path d="M1 4.5h9M3.5.5v2M7.5.5v2"/></svg> ${esc(when)}`);
-    if(proj)meta.push(`<svg viewBox="0 0 11 11" fill="none" stroke="currentColor" stroke-width="1.4" style="width:9px;height:9px"><path d="M1.5 7.5V4L5.5 2 9.5 4v3.5L5.5 9z"/></svg> ${esc(proj)}`);
-    if(w)meta.push(`w ${w}`);
-    if(m.access_count)meta.push(`${m.access_count}×`);
-    const del=m.id
-      ?`<button class="mdel" data-id="${esc(m.id)}" data-topic="${esc(topic)}" aria-label="Delete">
-          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
-            <path d="M2 3.5h10M5 3.5V2.5h4v1M5.5 6v4.5M8.5 6v4.5M3.5 3.5l.5 8h6l.5-8"/>
-          </svg></button>`:'';
-    return `<div class="mem ${impCls(imp)}">
-      <span class="badge b-${imp}">${imp}</span>
-      <div class="mbody">
-        <div class="mtopic">${esc(topic)}</div>
-        <div class="msum">${esc(summary)}</div>
-        ${meta.length?`<div class="mmeta">${meta.map(x=>`<span>${x}</span>`).join('')}</div>`:''}
-      </div>${del}</div>`;
-  }).join('');
-  $('list').querySelectorAll('.mdel').forEach(b=>b.addEventListener('click',onDelete));
-}
-
-function showSkel(){
-  $('list').innerHTML=[1,2,3,4].map(()=>`
-    <div class="skel">
-      <div class="sl-line" style="width:55%;height:13px"></div>
-      <div class="sl-line" style="width:88%;margin-top:10px"></div>
-      <div class="sl-line" style="width:36%;margin-top:8px;height:9px;opacity:.5"></div>
-    </div>`).join('');
-  $('secChip').style.display='none';
-}
-
-/* ── delete ─────────────────────────────────────────── */
-async function onDelete(e){
-  const btn=e.currentTarget;
-  const id=btn.dataset.id,topic=btn.dataset.topic||'this memory';
-  const ok=await confirm2(`Delete memory?`,`"${topic}" will be permanently removed.`);
-  if(!ok)return;
-  try{
-    const r=await fetch('/memories/'+encodeURIComponent(id),{method:'DELETE'});
-    if(!r.ok){toast('Delete failed ('+r.status+')','err');return;}
-    const row=btn.closest('.mem');
-    row.style.cssText='opacity:0;transform:translateX(-10px);transition:all .2s ease;';
-    setTimeout(()=>{row.remove();loadStats();},200);
-    toast('Memory deleted');
-  }catch(err){toast('Delete failed: '+err,'err');}
-}
-
-/* ── search / load ─────────────────────────────────── */
-function qp(extra){
-  const proj=$('projectFilter').value;
-  const u=new URLSearchParams(extra||{});
-  if(proj)u.set('project',proj);u.set('limit','50');return u.toString();
-}
-async function loadRecent(){
-  $('listTitle').textContent='Recent memories'+($('projectFilter').value?' · '+$('projectFilter').value:'');
-  showSkel();
-  try{const r=await(await fetch('/memories?'+qp())).json();render(r.memories||[]);}
-  catch(_){$('list').innerHTML='<div class="empty-state"><p>Failed to load</p></div>';}
-}
-async function search(){
-  const q=$('q').value.trim();
-  if(!q){loadRecent();return;}
-  $('listTitle').textContent='Results for "'+q+'"'+($('projectFilter').value?' in '+$('projectFilter').value:'');
-  showSkel();
-  try{const r=await(await fetch('/memories?'+qp({q}))).json();render(r.memories||[]);}
-  catch(_){$('list').innerHTML='<div class="empty-state"><p>Search failed</p></div>';}
-}
-function clearSearch(){
-  $('q').value='';$('projectFilter').value='';
-  projTrigger.querySelector('.lbl').textContent='All projects';
-  renderProjMenu();
-  loadRecent();
-}
-
-/* ── clusters ─────────────────────────────────────── */
-async function openClusters(){
-  $('clusterModal').classList.add('open');
-  $('clusterBody').innerHTML='<div class="empty-state"><p>Scanning for near-duplicates…</p></div>';
-  $('consolidateBtn').style.display='none';
-  try{
-    const proj=$('projectFilter').value;
-    const r=await(await fetch('/clusters?threshold=0.85'+(proj?'&project='+encodeURIComponent(proj):'')+'')).json();
-    const clusters=r.clusters||[];
-    if(!clusters.length){
-      $('clusterBody').innerHTML=`<div class="empty-state">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 13l4 4L19 7"/></svg>
-        <p>No near-duplicates found</p><small>Your memory store is clean.</small></div>`;
-      return;
-    }
-    $('consolidateBtn').style.display='';
-    $('clusterBody').innerHTML=clusters.map((c,i)=>`
-      <div class="clu-card">
-        <div class="clu-head">
-          <span class="clu-num">${i+1}</span>
-          <span class="clu-ttl">Cluster ${i+1}</span>
-          <span class="clu-cnt">${c.length} memories</span>
-        </div>
-        ${c.slice(0,5).map(m=>`
-          <div class="clu-item">
-            <strong>${esc(m.topic||'')}</strong>
-            <span>: ${esc((m.summary||'').slice(0,160))}</span>
-          </div>`).join('')}
-        ${c.length>5?`<div class="clu-item" style="font-style:italic;color:var(--muted)">&#8230;and ${c.length-5} more</div>`:''}
-      </div>`).join('');
-  }catch(e){$('clusterBody').innerHTML='<div class="empty-state"><p>Failed to load clusters</p></div>';}
-}
-function closeClusters(){$('clusterModal').classList.remove('open');}
-async function runConsolidate(){
-  const ok=await confirm2('Consolidate all clusters?',
-    'Each cluster of near-duplicates will be merged into one. Duplicates will be permanently deleted.');
-  if(!ok)return;
-  const btn=$('consolidateBtn');btn.disabled=true;btn.textContent='Consolidating…';
-  try{
-    const r=await(await fetch('/tools/call',{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({name:'noshy_consolidate_clusters',
-        arguments:{threshold:0.85,project:$('projectFilter').value||undefined}})
-    })).json();
-    toast((r.content&&r.content[0]&&r.content[0].text)||'Done.');
-    closeClusters();loadStats();loadProjects();loadRecent();
-  }catch(e){toast('Consolidate failed: '+e,'err');}
-  finally{btn.disabled=false;btn.textContent='Consolidate all';}
-}
-
-/* ── keyboard ─────────────────────────────────────── */
-$('q').addEventListener('keydown',e=>{
-  if(e.key==='Enter')search();
-  if(e.key==='Escape')clearSearch();
-});
-$('clusterBtn').addEventListener('click',openClusters);
-
-/* ── boot ─────────────────────────────────────────── */
-loadStats();loadProjects();loadRecent();
-setInterval(loadStats,15000);setInterval(loadProjects,30000);
-</script>
-</body>
-</html>"""
+# Backwards-compat alias used by tests that read this at import time.
+DASHBOARD_HTML = _load_dashboard_html()
 
 
 # ──────────── HTTP API mode ────────────
@@ -1390,12 +648,18 @@ def run_http(host: str = "127.0.0.1", port: int = 8720, db_path: str = None):
     """Run Noshy as an HTTP API server with graceful shutdown."""
     global store
     import hmac, signal
-    embedder = auto_embedder()
-    store = NoshyStore(db_path=db_path, embedder=embedder)
+    from store_factory import get_store as _get_shared
+    from config import get as _cfg
+    store = _get_shared(db_path=db_path)
 
-    auth_token = os.environ.get("NOSHY_HTTP_TOKEN", "")
+    # Token may come from env (NOSHY_HTTP_TOKEN) or ~/.noshy/config.toml
+    auth_token = _cfg("http_token") or os.environ.get("NOSHY_HTTP_TOKEN", "")
     if auth_token:
         log.info("HTTP auth enabled (Bearer token required)")
+    # The dashboard HTML itself is always public — it carries the token prompt UI.
+    # Health is public so containers can liveness-probe without secrets.
+    # All data routes (/stats, /memories, /projects, /clusters, /tools/*, DELETE)
+    # require the Bearer token when auth is enabled.
     public_paths = {"/health", "/", "/dashboard"}
 
     def _is_authorized(handler) -> bool:
@@ -1505,7 +769,7 @@ def run_http(host: str = "127.0.0.1", port: int = 8720, db_path: str = None):
                     return
 
                 if path in ("/", "/dashboard"):
-                    self._send_html(200, DASHBOARD_HTML)
+                    self._send_html(200, _load_dashboard_html())
                 elif path == "/stats":
                     self._send_json(200, store.get_stats())
                 elif path == "/memories":
@@ -1592,6 +856,9 @@ def run_http(host: str = "127.0.0.1", port: int = 8720, db_path: str = None):
 # ──────────── CLI ────────────
 
 def main():
+    from config import get as _cfg
+    default_host = _cfg("http_host", "127.0.0.1")
+    default_port = int(_cfg("http_port", 8720))
     parser = argparse.ArgumentParser(description="Noshy — MCP-native memory for AI agents")
     parser.add_argument("--db", help="Database path", default=None)
     sub = parser.add_subparsers(dest="command")
@@ -1601,8 +868,8 @@ def main():
 
     # HTTP mode
     http_p = sub.add_parser("http", help="Run as HTTP API server")
-    http_p.add_argument("--host", default="127.0.0.1")
-    http_p.add_argument("--port", type=int, default=8720)
+    http_p.add_argument("--host", default=default_host)
+    http_p.add_argument("--port", type=int, default=default_port)
 
     # Import
     imp = sub.add_parser("import", help="Import from ICM database")
@@ -1651,8 +918,8 @@ def main():
 
     # "serve" is a friendly alias for "http"
     serve_p = sub.add_parser("serve", help="Alias for `http` — start the HTTP server + dashboard")
-    serve_p.add_argument("--host", default="127.0.0.1")
-    serve_p.add_argument("--port", type=int, default=8720)
+    serve_p.add_argument("--host", default=default_host)
+    serve_p.add_argument("--port", type=int, default=default_port)
 
     args = parser.parse_args()
 
@@ -1671,7 +938,8 @@ def main():
         return
 
     global store
-    store = NoshyStore(db_path=db, embedder=auto_embedder())
+    from store_factory import get_store as _get_shared
+    store = _get_shared(db_path=db)
 
     def _out(text_lines, payload):
         if as_json:

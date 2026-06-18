@@ -92,6 +92,12 @@ def get(key: str, default=None):
     return load_config().get(key, default)
 
 
+def clear_cache():
+    """Drop the cached config so the next call re-reads file + env. Tests use this."""
+    global _config
+    _config = None
+
+
 def create_default_config():
     """Write a default config file to ~/.noshy/config.toml."""
     config_path = Path("~/.noshy/config.toml").expanduser()

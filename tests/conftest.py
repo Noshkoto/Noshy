@@ -11,10 +11,16 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), os.pa
 
 @pytest.fixture(autouse=True)
 def _isolated_env(monkeypatch):
-    """Force keyword-only mode by default so tests never hit a live LLM."""
+    """Force keyword-only mode by default so tests never hit a live LLM.
+    Reset the shared store_factory singleton between tests so each test
+    gets a fresh store bound to its own tmpdb."""
     monkeypatch.setenv("NOSHY_EMBED_PROVIDER", "none")
-    # Point any module that creates its own NoshyStore at the per-test DB
+    import store_factory, config
+    store_factory.reset_store(None)
+    config.clear_cache()
     yield
+    store_factory.reset_store(None)
+    config.clear_cache()
 
 
 @pytest.fixture

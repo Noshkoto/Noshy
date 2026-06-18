@@ -1,44 +1,48 @@
 """
-Noshy shared store singleton — all modules import from here.
-Prevents 5 separate SQLite connections to the same database.
+Shared NoshyStore singleton.
+
+All Noshy modules (decorator, context, hooks, server) should obtain their
+store via `get_store()` from this module instead of constructing their own.
+This avoids opening N redundant SQLite connections + N embedder instances
+against the same database file.
 """
-import os
-import logging
+import threading
 from typing import Optional
 
-log = logging.getLogger("noshy.store_factory")
-
 _store = None
-_embedder = None
+_lock = threading.Lock()
 
 
 def get_store(db_path: str = None, embedder=None):
-    """Get or create the shared NoshyStore singleton."""
-    global _store, _embedder
-    if _store is None or (db_path and _store.db_path != db_path):
-        from store import NoshyStore
-        if embedder is None:
-            _embedder = _detect_embedder()
-        else:
-            _embedder = embedder
-        _store = NoshyStore(db_path=db_path, embedder=_embedder)
-        log.debug(f"Shared store initialized: {_store.db_path} (embedder: {type(_embedder).__name__})")
+    """Return the process-wide NoshyStore singleton.
+
+    First call creates it; subsequent calls ignore the args. Pass
+    explicit db_path/embedder only on first access (or after reset_store()).
+    """
+    global _store
+    if _store is not None:
+        return _store
+    with _lock:
+        if _store is None:
+            from store import NoshyStore
+            if embedder is None:
+                from embed import auto_embedder
+                embedder = auto_embedder()
+            _store = NoshyStore(db_path=db_path, embedder=embedder)
     return _store
 
 
-def reset_store():
-    """Reset the singleton — closes connections and clears reference."""
-    global _store, _embedder
-    if _store is not None:
-        try:
-            _store.close()
-        except Exception:
-            pass
-    _store = None
-    _embedder = None
+def reset_store(store=None):
+    """Replace the singleton — primarily for tests.
 
-
-def _detect_embedder():
-    """Auto-detect the best available embedding provider."""
-    from embed import auto_embedder
-    return auto_embedder()
+    Pass an explicit NoshyStore to install it, or None to clear so the
+    next get_store() builds a fresh one.
+    """
+    global _store
+    with _lock:
+        if _store is not None and store is not _store:
+            try:
+                _store.shutdown()
+            except Exception:
+                pass
+        _store = store

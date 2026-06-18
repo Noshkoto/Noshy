@@ -52,7 +52,12 @@ class NoshyStore:
 
     def __init__(self, db_path: str = None, embedding_dims: int = DEFAULT_EMBEDDING_DIMS, embedder=None):
         if db_path is None:
-            db_path = os.environ.get("NOSHY_DB") or os.path.expanduser("~/.noshy/memories.db")
+            try:
+                from config import get as _cfg
+                db_path = _cfg("db_path")
+            except Exception:
+                db_path = os.environ.get("NOSHY_DB") or os.path.expanduser("~/.noshy/memories.db")
+            db_path = os.path.expanduser(db_path)
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.embedding_dims = embedding_dims
@@ -109,15 +114,27 @@ class NoshyStore:
         self._all_conns.add(conn)
         return conn
 
+    # Class-level cache: sqlite-vec import availability is a process-wide fact.
+    # Once we know it's missing we shouldn't pay the ImportError cost on every
+    # new thread's first connection.
+    _sqlite_vec_module = None  # None=unchecked, False=unavailable, module=loaded
+
     def _try_load_sqlite_vec(self, conn: sqlite3.Connection) -> bool:
         """Best-effort load of the sqlite-vec extension. Returns True on success."""
-        try:
-            import sqlite_vec  # type: ignore
-        except ImportError:
+        cls = type(self)
+        if cls._sqlite_vec_module is False:
             return False
+        if cls._sqlite_vec_module is None:
+            try:
+                import sqlite_vec  # type: ignore
+                cls._sqlite_vec_module = sqlite_vec
+            except ImportError:
+                cls._sqlite_vec_module = False
+                log.info("sqlite-vec not available — using blob-based cosine similarity fallback")
+                return False
         try:
             conn.enable_load_extension(True)
-            sqlite_vec.load(conn)
+            cls._sqlite_vec_module.load(conn)
             conn.enable_load_extension(False)
             return True
         except Exception as e:
@@ -508,6 +525,39 @@ class NoshyStore:
             params.append(project)
         query += " ORDER BY weight DESC"
         all_rows = self.conn.execute(query, params).fetchall()
+        # Try numpy fast path
+        try:
+            import numpy as np  # type: ignore
+            import struct as _struct
+            d_q = len(embedding) // 4
+            if d_q == 0:
+                return []
+            q = np.array(_struct.unpack(f"{d_q}f", embedding[:d_q * 4]), dtype=np.float32)
+            nq = np.linalg.norm(q) or 1.0
+            q = q / nq
+            valid = []
+            for row in all_rows:
+                e = row["embedding"]
+                if not e:
+                    continue
+                d = min(len(e) // 4, d_q)
+                if d == 0:
+                    continue
+                valid.append((row, _struct.unpack(f"{d}f", e[:d * 4])[:d_q]))
+            if not valid:
+                return []
+            min_d = min(len(v) for _, v in valid)
+            arr = np.array([v[:min_d] for _, v in valid], dtype=np.float32)
+            norms = np.linalg.norm(arr, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0
+            arr = arr / norms
+            scores = arr @ q[:min_d]
+            order = np.argsort(-scores)[:limit]
+            return [dict(valid[int(i)][0]) for i in order]
+        except Exception as e:
+            log.debug(f"numpy semantic path failed, falling back: {e}")
+
+        # Pure-Python fallback
         scored = []
         for row in all_rows:
             if row["embedding"]:
@@ -774,16 +824,51 @@ class NoshyStore:
             if ra != rb:
                 parent[ra] = rb
 
-        for i in range(n):
-            ei = rows[i]["embedding"]
-            if not ei:
-                continue
-            for j in range(i + 1, n):
-                ej = rows[j]["embedding"]
-                if not ej:
+        # Fast path: numpy vectorized cosine. Decode each embedding once into
+        # an N×D float32 matrix, normalize rows, then sim = M @ M.T. One BLAS
+        # call beats ~n²/2 pure-Python loops for n>~30.
+        used_fast = False
+        try:
+            import numpy as np  # type: ignore
+            import struct as _struct
+            valid_idx: List[int] = []
+            vectors: List[Any] = []
+            for i in range(n):
+                ei = rows[i]["embedding"]
+                if not ei:
                     continue
-                if _cosine_similarity(ei, ej) >= threshold:
-                    union(i, j)
+                d = len(ei) // 4
+                if d == 0:
+                    continue
+                valid_idx.append(i)
+                vectors.append(_struct.unpack(f"{d}f", ei[:d * 4]))
+            if len(valid_idx) >= 2:
+                # Pad/truncate to the common min dim
+                min_d = min(len(v) for v in vectors)
+                arr = np.array([v[:min_d] for v in vectors], dtype=np.float32)
+                norms = np.linalg.norm(arr, axis=1, keepdims=True)
+                norms[norms == 0] = 1.0
+                arr = arr / norms
+                sim = arr @ arr.T
+                # Upper triangle pairs above threshold
+                pairs = np.argwhere(np.triu(sim >= threshold, k=1))
+                for a, b in pairs:
+                    union(valid_idx[int(a)], valid_idx[int(b)])
+                used_fast = True
+        except Exception as e:
+            log.debug(f"numpy clustering path failed, falling back: {e}")
+
+        if not used_fast:
+            for i in range(n):
+                ei = rows[i]["embedding"]
+                if not ei:
+                    continue
+                for j in range(i + 1, n):
+                    ej = rows[j]["embedding"]
+                    if not ej:
+                        continue
+                    if _cosine_similarity(ei, ej) >= threshold:
+                        union(i, j)
 
         groups: Dict[int, List[Dict]] = {}
         for i, row in enumerate(rows):

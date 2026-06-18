@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from store import NoshyStore
 from extractor import extract_facts
-from embed import auto_embedder
+from store_factory import get_store as _shared_store
 
 log = logging.getLogger("aion.hook")
 
@@ -37,8 +37,7 @@ def on_session_end(transcript: str, *, project: str = "default", max_memories: i
 
     log.info(f"Extracting from {len(transcript)} chars...")
 
-    embedder = auto_embedder()
-    store = NoshyStore(embedder=embedder)
+    store = _shared_store()
 
     facts = extract_facts(transcript)
 
@@ -140,7 +139,7 @@ def daily_sweep(project: str = None):
 
     Call this from a cron job or scheduled task.
     """
-    store = NoshyStore()
+    store = _shared_store()
 
     # Purge anything past its TTL
     purged = store.purge_expired()

@@ -29,31 +29,23 @@ from typing import Optional, List, Dict, Any, Callable
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from store import NoshyStore
-from embed import auto_embedder
 
 log = logging.getLogger("noshy.decorator")
-
-_store: Optional[NoshyStore] = None
-_store_lock = threading.Lock()
 
 # Thread-local stack of active sessions (project + tags pushed by `session()`)
 _ctx = threading.local()
 
 
 def get_store() -> NoshyStore:
-    """Lazy, thread-safe singleton."""
-    global _store
-    if _store is None:
-        with _store_lock:
-            if _store is None:
-                _store = NoshyStore(embedder=auto_embedder())
-    return _store
+    """Lazy, thread-safe singleton. Delegates to store_factory."""
+    from store_factory import get_store as _get
+    return _get()
 
 
 def reset_store(store: NoshyStore = None):
     """Override the global store — primarily for tests."""
-    global _store
-    _store = store
+    from store_factory import reset_store as _reset
+    _reset(store)
 
 
 def _stack() -> List[Dict[str, Any]]:

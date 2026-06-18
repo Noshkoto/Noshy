@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "noshy"
-version = "0.2.3"
+version = "0.3.0"
 description = "Persistent memory for AI agents — MCP-native, works with any LLM"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -30,8 +30,9 @@ dependencies = []
 [project.optional-dependencies]
 fastembed = ["fastembed>=0.4"]
 sqlite-vec = ["sqlite-vec>=0.1"]
-all = ["fastembed>=0.4", "sqlite-vec>=0.1"]
-dev = ["pytest>=7", "build>=1", "twine>=5"]
+numpy = ["numpy>=1.24"]
+all = ["fastembed>=0.4", "sqlite-vec>=0.1", "numpy>=1.24"]
+dev = ["pytest>=7", "build>=1", "twine>=5", "numpy>=1.24"]
 
 [project.scripts]
 noshy = "server:main"
@@ -43,7 +44,10 @@ Issues = "https://github.com/noshkoto/Noshy/issues"
 Changelog = "https://github.com/noshkoto/Noshy/releases"
 
 [tool.setuptools]
-py-modules = ["store", "extractor", "embed", "server", "hermes_skill", "hooks", "context", "decorator", "noshy"]
+py-modules = ["store", "store_factory", "config", "extractor", "embed", "server", "hermes_skill", "hooks", "context", "decorator", "noshy"]
+
+[tool.setuptools.data-files]
+"share/noshy" = ["dashboard.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

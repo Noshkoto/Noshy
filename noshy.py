@@ -11,7 +11,8 @@ Noshy public Python API.
 
     noshy.recall("deploy")
 """
-from decorator import remember, session, recall, get_store, reset_store
+from decorator import remember, session, recall
+from store_factory import get_store, reset_store
 from store import NoshyStore
 from embed import auto_embedder
 

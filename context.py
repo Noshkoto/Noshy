@@ -17,18 +17,14 @@ from typing import Optional, List, Dict, Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from store import NoshyStore
-from embed import auto_embedder
 
 log = logging.getLogger("aion.context")
 
-_shared_store: Optional[NoshyStore] = None
-
 
 def _get_store() -> NoshyStore:
-    global _shared_store
-    if _shared_store is None:
-        _shared_store = NoshyStore(embedder=auto_embedder())
-    return _shared_store
+    """Shared NoshyStore singleton (via store_factory)."""
+    from store_factory import get_store
+    return get_store()
 
 # ──────────── Session Start Context ────────────
 
