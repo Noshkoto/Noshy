@@ -178,6 +178,75 @@ def extract_facts(
 _VALID_IMPORTANCE = {"critical", "high", "medium", "low"}
 
 
+CONTRADICTION_PROMPT = """You are a memory contradiction checker. Two memory
+summaries are below. Decide whether they assert conflicting facts about the
+same subject (e.g. opposite preferences, mutually exclusive choices, replaced
+decisions). Disagreements in tone or emphasis do NOT count — only factual
+conflicts.
+
+Memory A: {summary_a}
+Memory B: {summary_b}
+
+Output ONLY valid JSON, no commentary:
+{{
+  "contradicts": true|false,
+  "confidence": 0.0-1.0,
+  "explanation": "one short sentence — what actually conflicts, or '' if not"
+}}"""
+
+
+_CONTRADICTION_FAIL = {"contradicts": False, "confidence": 0.0, "explanation": "unavailable"}
+
+
+def check_contradiction(
+    summary_a: str,
+    summary_b: str,
+    *,
+    api_base: str = None,
+    api_key: str = None,
+    model: str = None,
+) -> dict:
+    """Ask the LLM whether two memory summaries assert conflicting facts.
+
+    Returns {"contradicts": bool, "confidence": float (0-1), "explanation": str}.
+    On any failure (no endpoint configured, API error, bad JSON) returns the
+    "unavailable" default rather than raising — callers should never have to
+    special-case this.
+    """
+    if not summary_a or not summary_b:
+        return dict(_CONTRADICTION_FAIL)
+    a = summary_a.strip()[:400]
+    b = summary_b.strip()[:400]
+    if len(a) < 5 or len(b) < 5:
+        return dict(_CONTRADICTION_FAIL)
+    prompt = CONTRADICTION_PROMPT.format(summary_a=a, summary_b=b)
+    response = _call_llm(
+        prompt, api_base=api_base, api_key=api_key, model=model,
+        max_tokens=120, temperature=0.0,
+    )
+    if not response:
+        return dict(_CONTRADICTION_FAIL)
+    try:
+        data = json.loads(response)
+    except json.JSONDecodeError:
+        import re
+        m = re.search(r"\{[\s\S]*\}", response)
+        if not m:
+            return dict(_CONTRADICTION_FAIL)
+        try:
+            data = json.loads(m.group())
+        except json.JSONDecodeError:
+            return dict(_CONTRADICTION_FAIL)
+    try:
+        contradicts = bool(data.get("contradicts", False))
+        confidence = float(data.get("confidence", 0.0))
+        confidence = max(0.0, min(1.0, confidence))
+        explanation = str(data.get("explanation", "") or "")[:240]
+    except (TypeError, ValueError):
+        return dict(_CONTRADICTION_FAIL)
+    return {"contradicts": contradicts, "confidence": confidence, "explanation": explanation}
+
+
 def predict_importance(
     topic: str,
     summary: str,

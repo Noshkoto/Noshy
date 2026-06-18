@@ -775,7 +775,160 @@ class NoshyStore:
         self.conn.commit()
         return len(gone)
 
+    # ──────────── Extraction Queue ────────────
+
+    def queue_extraction(self, raw_text: str, *, session_id: str = None,
+                         source: str = "queued") -> str:
+        """Queue a transcript for later extraction. Returns the pending row id."""
+        pid = _ulid()
+        self.conn.execute("""
+        INSERT INTO pending_extractions (id, session_id, raw_text, source, created_at, status)
+        VALUES (?, ?, ?, ?, ?, 'pending')
+        """, (pid, session_id, raw_text, source, _utcnow_iso()))
+        self.conn.commit()
+        return pid
+
+    def get_pending_extractions(self, *, status: str = "pending",
+                                limit: int = 20) -> List[Dict]:
+        """Fetch queued extractions, oldest first."""
+        rows = self.conn.execute("""
+        SELECT id, session_id, raw_text, source, created_at, extracted_at, status
+        FROM pending_extractions
+        WHERE status = ?
+        ORDER BY created_at ASC
+        LIMIT ?
+        """, (status, limit)).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_extraction_done(self, pending_id: str, *, status: str = "done"):
+        """Mark a pending extraction as processed (status: 'done' or 'failed')."""
+        self.conn.execute("""
+        UPDATE pending_extractions SET status = ?, extracted_at = ? WHERE id = ?
+        """, (status, _utcnow_iso(), pending_id))
+        self.conn.commit()
+
+    def apply_extracted_facts(self, facts: List[Dict], *,
+                              project: str = "default",
+                              source: str = "extract") -> int:
+        """Persist extractor.extract_facts() output into the store.
+
+        Shared between the synchronous noshy_extract_session path and the
+        async process_extraction_queue path so both branches store facts
+        identically. Returns the count of memories written (relationships and
+        concepts don't count toward this).
+        """
+        if not facts:
+            return 0
+        count = 0
+        for f in facts:
+            kind = f.get("_type")
+            if kind == "relationship":
+                self.link_memories(f["source_id"], f["target_id"],
+                                   f.get("relation", "related"))
+            elif kind == "concept":
+                pass  # concepts are materialized lazily during recall
+            else:
+                self.store_memory(
+                    topic=f["topic"], summary=f["summary"],
+                    keywords=f.get("keywords"),
+                    importance=f.get("importance", "medium"),
+                    source=source, project=project,
+                )
+                count += 1
+        return count
+
+    def process_extraction_queue(self, *, limit: int = 10,
+                                 project: str = "default") -> Dict[str, int]:
+        """Pull up to `limit` pending extractions and run them through
+        extractor.extract_facts(), storing resulting memories the same way
+        noshy_extract_session does. Marks each row 'done' on success, 'failed'
+        on exception (and logs it — never let one bad transcript abort the
+        batch). Returns {"processed": N, "stored": M, "failed": K}.
+        """
+        from extractor import extract_facts
+
+        pending = self.get_pending_extractions(limit=limit)
+        processed = stored = failed = 0
+        for row in pending:
+            try:
+                facts = extract_facts(row["raw_text"])
+                stored += self.apply_extracted_facts(
+                    facts, project=project, source="queue-extract")
+                self.mark_extraction_done(row["id"], status="done")
+                processed += 1
+            except Exception as e:
+                log.warning(f"Extraction failed for {row['id']}: {e}")
+                try:
+                    self.mark_extraction_done(row["id"], status="failed")
+                except Exception:
+                    pass
+                failed += 1
+        return {"processed": processed, "stored": stored, "failed": failed}
+
     # ──────────── Cluster detection ────────────
+
+    def _fetch_embedded_pairs(
+        self,
+        *,
+        project: str = None,
+        sample_limit: int = 500,
+    ):
+        """Shared base for pairwise similarity scans (find_clusters,
+        find_contradictions).
+
+        Pulls up to `sample_limit` recent non-expired memories that have an
+        embedding stored. Returns (rows, sim_matrix, valid_idx) where:
+          - rows is the full list of fetched rows (some may lack a usable
+            embedding and won't appear in valid_idx)
+          - valid_idx maps positions in the similarity matrix back to rows
+          - sim_matrix is an N×N numpy array of cosine similarities when
+            numpy is available (rows normalised first), or None on the
+            pure-Python fallback (callers must compute pairwise distances
+            themselves via _cosine_similarity in that case).
+        """
+        query = (
+            "SELECT id, topic, summary, weight, project, created_at, embedding "
+            "FROM memories WHERE embedding IS NOT NULL "
+            "AND (expires_at IS NULL OR expires_at > ?)"
+        )
+        params: List[Any] = [_utcnow_iso()]
+        if project:
+            query += " AND project = ?"
+            params.append(project)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(sample_limit)
+        rows = self.conn.execute(query, params).fetchall()
+        if len(rows) < 2:
+            return rows, None, []
+
+        # Fast path: build the full N×D float32 matrix once and let numpy do
+        # the cosine math in one BLAS call.
+        try:
+            import numpy as np  # type: ignore
+            import struct as _struct
+            valid_idx: List[int] = []
+            vectors: List[Any] = []
+            for i, r in enumerate(rows):
+                ei = r["embedding"]
+                if not ei:
+                    continue
+                d = len(ei) // 4
+                if d == 0:
+                    continue
+                valid_idx.append(i)
+                vectors.append(_struct.unpack(f"{d}f", ei[:d * 4]))
+            if len(valid_idx) < 2:
+                return rows, None, valid_idx
+            min_d = min(len(v) for v in vectors)
+            arr = np.array([v[:min_d] for v in vectors], dtype=np.float32)
+            norms = np.linalg.norm(arr, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0
+            arr = arr / norms
+            sim = arr @ arr.T
+            return rows, sim, valid_idx
+        except Exception as e:
+            log.debug(f"numpy similarity path failed, falling back: {e}")
+        return rows, None, []
 
     def find_clusters(
         self,
@@ -795,18 +948,8 @@ class NoshyStore:
         Only considers memories that have an embedding stored; capped to the
         most recent `sample_limit` rows to keep this O(n²) step bounded.
         """
-        query = (
-            "SELECT id, topic, summary, weight, project, created_at, embedding "
-            "FROM memories WHERE embedding IS NOT NULL "
-            "AND (expires_at IS NULL OR expires_at > ?)"
-        )
-        params: List[Any] = [_utcnow_iso()]
-        if project:
-            query += " AND project = ?"
-            params.append(project)
-        query += " ORDER BY created_at DESC LIMIT ?"
-        params.append(sample_limit)
-        rows = self.conn.execute(query, params).fetchall()
+        rows, sim, valid_idx = self._fetch_embedded_pairs(
+            project=project, sample_limit=sample_limit)
         n = len(rows)
         if n < 2:
             return []
@@ -824,41 +967,12 @@ class NoshyStore:
             if ra != rb:
                 parent[ra] = rb
 
-        # Fast path: numpy vectorized cosine. Decode each embedding once into
-        # an N×D float32 matrix, normalize rows, then sim = M @ M.T. One BLAS
-        # call beats ~n²/2 pure-Python loops for n>~30.
-        used_fast = False
-        try:
+        if sim is not None and len(valid_idx) >= 2:
             import numpy as np  # type: ignore
-            import struct as _struct
-            valid_idx: List[int] = []
-            vectors: List[Any] = []
-            for i in range(n):
-                ei = rows[i]["embedding"]
-                if not ei:
-                    continue
-                d = len(ei) // 4
-                if d == 0:
-                    continue
-                valid_idx.append(i)
-                vectors.append(_struct.unpack(f"{d}f", ei[:d * 4]))
-            if len(valid_idx) >= 2:
-                # Pad/truncate to the common min dim
-                min_d = min(len(v) for v in vectors)
-                arr = np.array([v[:min_d] for v in vectors], dtype=np.float32)
-                norms = np.linalg.norm(arr, axis=1, keepdims=True)
-                norms[norms == 0] = 1.0
-                arr = arr / norms
-                sim = arr @ arr.T
-                # Upper triangle pairs above threshold
-                pairs = np.argwhere(np.triu(sim >= threshold, k=1))
-                for a, b in pairs:
-                    union(valid_idx[int(a)], valid_idx[int(b)])
-                used_fast = True
-        except Exception as e:
-            log.debug(f"numpy clustering path failed, falling back: {e}")
-
-        if not used_fast:
+            pairs = np.argwhere(np.triu(sim >= threshold, k=1))
+            for a, b in pairs:
+                union(valid_idx[int(a)], valid_idx[int(b)])
+        else:
             for i in range(n):
                 ei = rows[i]["embedding"]
                 if not ei:
@@ -880,6 +994,167 @@ class NoshyStore:
         clusters = [g for g in groups.values() if len(g) >= min_size]
         clusters.sort(key=lambda g: (-len(g), min((m["id"] for m in g))))
         return clusters
+
+    # ──────────── Contradiction detection ────────────
+
+    def find_contradictions(
+        self,
+        *,
+        similarity_band: tuple = (0.55, 0.85),
+        project: str = None,
+        sample_limit: int = 500,
+        max_llm_checks: int = 30,
+    ) -> List[Dict]:
+        """Find pairs of memories that are topically close but may assert
+        conflicting facts.
+
+        Unlike find_clusters() (which looks for near-duplicates above a high
+        threshold), this looks at pairs in a MIDDLE similarity band — close
+        enough to be about the same thing, not so close they're just restated
+        duplicates — then asks the LLM extractor to confirm/deny an actual
+        contradiction. Returns a list of dicts:
+            {"memory_a": {...}, "memory_b": {...}, "confidence": float,
+             "explanation": str}
+        ordered by confidence descending. Capped at `max_llm_checks` LLM calls
+        per invocation to keep cost bounded — callers running this periodically
+        (e.g. via sweep) will catch up over multiple runs on large stores.
+        """
+        from extractor import check_contradiction
+
+        lo, hi = float(similarity_band[0]), float(similarity_band[1])
+        rows, sim, valid_idx = self._fetch_embedded_pairs(
+            project=project, sample_limit=sample_limit)
+        n = len(rows)
+        if n < 2:
+            return []
+
+        # Build list of (similarity, row_a, row_b) candidate pairs strictly
+        # inside the band. Sort by similarity descending so the most likely
+        # conflicts get LLM-checked first under the max_llm_checks budget.
+        candidates: List[tuple] = []
+        if sim is not None and len(valid_idx) >= 2:
+            import numpy as np  # type: ignore
+            mask = np.triu(((sim > lo) & (sim < hi)), k=1)
+            pairs = np.argwhere(mask)
+            for a, b in pairs:
+                ra, rb = valid_idx[int(a)], valid_idx[int(b)]
+                candidates.append((float(sim[int(a), int(b)]), rows[ra], rows[rb]))
+        else:
+            for i in range(n):
+                ei = rows[i]["embedding"]
+                if not ei:
+                    continue
+                for j in range(i + 1, n):
+                    ej = rows[j]["embedding"]
+                    if not ej:
+                        continue
+                    s = _cosine_similarity(ei, ej)
+                    if lo < s < hi:
+                        candidates.append((s, rows[i], rows[j]))
+
+        if not candidates:
+            return []
+        candidates.sort(key=lambda x: -x[0])
+
+        results: List[Dict] = []
+        for _, ra, rb in candidates[:max_llm_checks]:
+            verdict = check_contradiction(ra["summary"], rb["summary"])
+            if not verdict.get("contradicts"):
+                continue
+            ma = dict(ra); ma.pop("embedding", None)
+            mb = dict(rb); mb.pop("embedding", None)
+            results.append({
+                "memory_a": ma,
+                "memory_b": mb,
+                "confidence": float(verdict.get("confidence", 0.0)),
+                "explanation": str(verdict.get("explanation", "") or ""),
+            })
+        results.sort(key=lambda r: -r["confidence"])
+        return results
+
+    def flag_contradictions(
+        self,
+        *,
+        project: str = None,
+        max_llm_checks: int = 30,
+    ) -> int:
+        """Run find_contradictions() and persist each confirmed pair as a
+        `contradicts` edge in memory_edges (skipping any pair that already has
+        such an edge in either direction).
+
+        Returns the count of NEW edges created. Safe to call repeatedly — does
+        not duplicate work on pairs already flagged.
+        """
+        results = self.find_contradictions(
+            project=project, max_llm_checks=max_llm_checks)
+        return self._persist_contradiction_results(results)
+
+    def _persist_contradiction_results(self, results: List[Dict]) -> int:
+        """Persist find_contradictions() output as `contradicts` edges.
+
+        Idempotent — looks up existing edges in one batched query and skips
+        any pair already linked in either direction. Returns the count of NEW
+        edges created. Shared between flag_contradictions() and the MCP tool
+        so both follow the same dedup logic.
+        """
+        if not results:
+            return 0
+        ids = sorted({r["memory_a"]["id"] for r in results}
+                     | {r["memory_b"]["id"] for r in results})
+        placeholders = ",".join("?" * len(ids))
+        existing = set()
+        for row in self.conn.execute(
+            f"SELECT source_id, target_id FROM memory_edges "
+            f"WHERE relation = 'contradicts' "
+            f"AND (source_id IN ({placeholders}) OR target_id IN ({placeholders}))",
+            ids + ids,
+        ).fetchall():
+            existing.add((row["source_id"], row["target_id"]))
+            existing.add((row["target_id"], row["source_id"]))
+        created = 0
+        for r in results:
+            a_id, b_id = r["memory_a"]["id"], r["memory_b"]["id"]
+            if (a_id, b_id) in existing:
+                continue
+            self.link_memories(a_id, b_id, relation="contradicts",
+                               strength=r["confidence"])
+            existing.add((a_id, b_id))
+            existing.add((b_id, a_id))
+            created += 1
+        return created
+
+    def get_contradictions_for(self, memory_ids: List[str]) -> Dict[str, List[Dict]]:
+        """For each id in memory_ids, return a list of memories it currently
+        conflicts with (per the `contradicts` edges in memory_edges).
+
+        Batched as a single IN-query — used by recall to inline conflict
+        warnings without N+1 lookups.
+        """
+        if not memory_ids:
+            return {}
+        ids = list(dict.fromkeys(memory_ids))  # dedup, preserve order
+        placeholders = ",".join("?" * len(ids))
+        rows = self.conn.execute(
+            f"SELECT e.source_id AS s, e.target_id AS t, "
+            f"m.id AS oid, m.topic AS otopic, m.summary AS osummary "
+            f"FROM memory_edges e "
+            f"JOIN memories m ON m.id = CASE "
+            f"  WHEN e.source_id IN ({placeholders}) THEN e.target_id "
+            f"  ELSE e.source_id END "
+            f"WHERE e.relation = 'contradicts' "
+            f"AND (e.source_id IN ({placeholders}) OR e.target_id IN ({placeholders}))",
+            ids + ids + ids,
+        ).fetchall()
+        out: Dict[str, List[Dict]] = {i: [] for i in ids}
+        for r in rows:
+            for own_id in (r["s"], r["t"]):
+                if own_id in out and r["oid"] != own_id:
+                    out[own_id].append({
+                        "id": r["oid"],
+                        "topic": r["otopic"],
+                        "summary": r["osummary"],
+                    })
+        return out
 
     def consolidate_clusters(
         self,

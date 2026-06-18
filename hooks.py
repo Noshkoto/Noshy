@@ -173,16 +173,26 @@ def daily_sweep(project: str = None):
     except Exception as e:
         log.debug(f"Cluster consolidation skipped: {e}")
 
+    # Drain any queued extractions (best-effort; needs LLM endpoint)
+    queue_stats = {"processed": 0, "stored": 0, "failed": 0}
+    try:
+        queue_stats = store.process_extraction_queue(limit=20)
+    except Exception as e:
+        log.debug(f"Queue processing skipped: {e}")
+
     stats = store.get_stats()
 
     avg_w = stats['avg_weight'] or 0.0
-    log.info(f"Daily sweep: {purged} expired purged, decay applied, {consolidated} memories consolidated")
+    log.info(f"Daily sweep: {purged} expired purged, decay applied, "
+             f"{consolidated} memories consolidated, "
+             f"queue processed {queue_stats['processed']}")
     log.info(f"Store: {stats['memory_count']} memories, avg weight {avg_w:.2f}")
 
     return {
         "purged": purged,
         "consolidated": consolidated,
         "clusters": cluster_stats["clusters"],
+        "queue": queue_stats,
         "stats": stats,
     }
 

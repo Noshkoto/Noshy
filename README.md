@@ -103,7 +103,12 @@ python3 server.py delete --project staging --yes
 # Maintenance
 python3 server.py purge                  # delete expired
 python3 server.py consolidate-clusters   # merge near-duplicates
-python3 server.py sweep                  # purge + decay + consolidate
+python3 server.py find-contradictions    # detect + link conflicting memory pairs
+python3 server.py sweep                  # purge + decay + consolidate + drain queue
+
+# Async extraction queue (hand off long transcripts without blocking on the LLM)
+python3 server.py queue --file session.txt --session-id sess-2026-06-18
+python3 server.py process-queue --limit 10
 
 # Import from ICM
 python3 server.py import /path/to/icm/memories.db
@@ -175,6 +180,9 @@ mcp_servers:
 | `noshy_predict_importance` | LLM-classify a candidate fact without storing it |
 | `noshy_find_clusters` | Preview clusters of semantically near-duplicate memories |
 | `noshy_consolidate_clusters` | Auto-merge those clusters in one pass |
+| `noshy_find_contradictions` | Detect (and link) pairs of memories that assert conflicting facts |
+| `noshy_queue_extraction` | Hand off a transcript for later LLM extraction without blocking |
+| `noshy_process_queue` | Drain queued extractions through the LLM |
 | `noshy_get_stats` | Database overview |
 
 ### HTTP API

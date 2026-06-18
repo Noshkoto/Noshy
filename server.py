@@ -122,6 +122,30 @@ MCP_TOOLS = [
         },
     },
     {
+        "name": "noshy_queue_extraction",
+        "description": "Queue a transcript for later LLM extraction without blocking. Returns the pending row id immediately. A periodic sweep (or noshy_process_queue) drains the queue. Use this when a Hermes session wants to hand off a long transcript without waiting on the extractor.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "transcript": {"type": "string", "description": "Raw conversation transcript to queue"},
+                "session_id": {"type": "string", "description": "Optional session identifier"},
+                "project": {"type": "string", "default": "default"},
+            },
+            "required": ["transcript"],
+        },
+    },
+    {
+        "name": "noshy_process_queue",
+        "description": "Drain up to `limit` pending extractions through the LLM extractor, storing resulting memories. Marks each row 'done' on success or 'failed' on exception. Returns processed/stored/failed counts.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "default": 10, "description": "Max queue rows to process per call"},
+                "project": {"type": "string", "default": "default"},
+            },
+        },
+    },
+    {
         "name": "noshy_consolidate",
         "description": "Merge related memories on a topic into one consolidated entry.",
         "inputSchema": {
@@ -253,6 +277,17 @@ MCP_TOOLS = [
             },
         },
     },
+    {
+        "name": "noshy_find_contradictions",
+        "description": "Find pairs of memories that may assert conflicting facts (e.g. opposite preferences, replaced decisions). Returns confirmed pairs with confidence and explanation; persists each as a 'contradicts' edge so future recalls can warn about them.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "Limit to a project"},
+                "max_llm_checks": {"type": "integer", "default": 30, "description": "Cap LLM disambiguation calls per run"},
+            },
+        },
+    },
 ]
 
 
@@ -260,7 +295,7 @@ def handle_initialize(params: Dict) -> Dict:
     return {
         "protocolVersion": "2024-11-05",
         "capabilities": {"tools": {}},
-        "serverInfo": {"name": "noshy", "version": "0.3.0"},
+        "serverInfo": {"name": "noshy", "version": "0.4.0"},
     }
 
 
@@ -348,39 +383,34 @@ def handle_tools_call(params: Dict) -> Dict:
             if not results:
                 return {"content": [{"type": "text", "text": "No memories found."}]}
 
+            # Batch-fetch contradicts edges for every returned memory id so we
+            # can inline a "⚠ conflicts with: …" line without N+1 queries.
+            ids = [r.get("id") for r in results if r.get("id") and r.get("_kind") != "memoir"]
+            conflicts = store.get_contradictions_for(ids) if ids else {}
+
             def _fmt(r):
                 if r.get("_kind") == "memoir":
                     return f"[MEMOIR] {r.get('topic', 'memoir')}\n{r.get('summary', '')}"
                 imp = (r.get("importance") or "medium").upper()
-                return f"[{imp}] {r.get('topic', 'unknown')}\n{r.get('summary', '')}"
+                head = f"[{imp}] {r.get('topic', 'unknown')}\n{r.get('summary', '')}"
+                other = conflicts.get(r.get("id")) if r.get("id") else None
+                if other:
+                    first = other[0]
+                    snip = (first.get("summary") or "")[:80]
+                    more = f" (+{len(other) - 1} more)" if len(other) > 1 else ""
+                    head = (f"⚠ conflicts with: {first.get('topic', 'memory')} — "
+                            f"\"{snip}\"{more}\n" + head)
+                return head
 
             out = "\n\n".join(_fmt(r) for r in results)
             return {"content": [{"type": "text", "text": out}]}
 
         elif name == "noshy_extract_session":
-            facts = extract_facts(
-                transcript=args["transcript"],
-            )
+            facts = extract_facts(transcript=args["transcript"])
             if not facts:
                 return {"content": [{"type": "text", "text": "No facts extracted."}]}
-
-            count = 0
-            for f in facts:
-                if f.get("_type") == "relationship":
-                    store.link_memories(f["source_id"], f["target_id"], f.get("relation", "related"))
-                elif f.get("_type") == "concept":
-                    pass  # handled during recall
-                else:
-                    store.store_memory(
-                        topic=f["topic"],
-                        summary=f["summary"],
-                        keywords=f.get("keywords"),
-                        importance=f.get("importance", "medium"),
-                        source="extract",
-                        project=args.get("project", "default"),
-                    )
-                    count += 1
-
+            count = store.apply_extracted_facts(
+                facts, project=args.get("project", "default"), source="extract")
             return {"content": [{"type": "text", "text": f"Extracted and stored {count} memories."}]}
 
         elif name == "noshy_stream_extract":
@@ -400,24 +430,30 @@ def handle_tools_call(params: Dict) -> Dict:
                 chunk_overlap=min(400, chunk_chars // 4),
             ):
                 chunk_count += 1
-                for f in facts:
-                    if f.get("_type") == "relationship":
-                        store.link_memories(f["source_id"], f["target_id"],
-                                            f.get("relation", "related"))
-                    elif f.get("_type") == "concept":
-                        pass
-                    else:
-                        store.store_memory(
-                            topic=f["topic"], summary=f["summary"],
-                            keywords=f.get("keywords"),
-                            importance=f.get("importance", "medium"),
-                            source="stream-extract",
-                            project=project,
-                        )
-                        total_stored += 1
+                total_stored += store.apply_extracted_facts(
+                    facts, project=project, source="stream-extract")
             return {"content": [{"type": "text",
                 "text": f"Streamed {len(chunks)} chunks, {chunk_count} produced facts, "
                         f"stored {total_stored} memories total."}]}
+
+        elif name == "noshy_queue_extraction":
+            pid = store.queue_extraction(
+                raw_text=args["transcript"],
+                session_id=args.get("session_id"),
+                source="mcp-queue",
+            )
+            return {"content": [{"type": "text",
+                "text": f"Queued extraction: {pid} (will be processed on the next sweep)."}]}
+
+        elif name == "noshy_process_queue":
+            counts = store.process_extraction_queue(
+                limit=int(args.get("limit", 10)),
+                project=args.get("project", "default"),
+            )
+            return {"content": [{"type": "text",
+                "text": f"Queue: processed {counts['processed']}, "
+                        f"stored {counts['stored']} memories, "
+                        f"{counts['failed']} failed."}]}
 
         elif name == "noshy_consolidate":
             count = store.consolidate(
@@ -529,6 +565,27 @@ def handle_tools_call(params: Dict) -> Dict:
             )
             return {"content": [{"type": "text",
                 "text": f"Consolidated {counts['clusters']} clusters, removed {counts['merged']} duplicates."}]}
+
+        elif name == "noshy_find_contradictions":
+            project = args.get("project")
+            max_llm = int(args.get("max_llm_checks", 30))
+            results = store.find_contradictions(
+                project=project, max_llm_checks=max_llm)
+            if not results:
+                return {"content": [{"type": "text", "text": "No contradictions detected."}]}
+            # Persist confirmed pairs as `contradicts` edges (idempotent).
+            edges = store._persist_contradiction_results(results)
+            lines = [f"Found {len(results)} contradicting pair(s) "
+                     f"({edges} new edge(s) recorded):"]
+            for i, r in enumerate(results[:10], 1):
+                a, b = r["memory_a"], r["memory_b"]
+                conf = r["confidence"]
+                lines.append(f"{i}. ({conf:.2f}) {a['topic']} ↔ {b['topic']}")
+                lines.append(f"   A: {(a['summary'] or '')[:120]}")
+                lines.append(f"   B: {(b['summary'] or '')[:120]}")
+                if r.get("explanation"):
+                    lines.append(f"   why: {r['explanation']}")
+            return {"content": [{"type": "text", "text": "\n".join(lines)}]}
 
         else:
             return {"content": [{"type": "text", "text": f"Unknown tool: {name}"}], "isError": True}
@@ -913,6 +970,23 @@ def main():
     cc_p.add_argument("--project", default=None)
     cc_p.add_argument("--max-clusters", type=int, default=20)
 
+    fc_p = _add_json(sub.add_parser("find-contradictions",
+                          help="Detect (and link) pairs of memories that may assert conflicting facts"))
+    fc_p.add_argument("--project", default=None)
+    fc_p.add_argument("--max-llm-checks", type=int, default=30)
+
+    q_p = _add_json(sub.add_parser("queue",
+                          help="Queue a transcript for later extraction (does not block on LLM)"))
+    q_g = q_p.add_mutually_exclusive_group(required=True)
+    q_g.add_argument("transcript", nargs="?", help="Transcript text (positional)")
+    q_g.add_argument("--file", help="Read transcript from a file path")
+    q_p.add_argument("--session-id", default=None)
+
+    pq_p = _add_json(sub.add_parser("process-queue",
+                          help="Drain queued extractions through the LLM"))
+    pq_p.add_argument("--limit", type=int, default=10)
+    pq_p.add_argument("--project", default="default")
+
     _add_json(sub.add_parser("purge", help="Delete expired memories now"))
     _add_json(sub.add_parser("sweep", help="Run the full maintenance sweep (purge + decay + consolidate)"))
 
@@ -1012,6 +1086,38 @@ def main():
         )
         _out([f"Consolidated {counts['clusters']} clusters, "
               f"removed {counts['merged']} duplicates"], counts)
+    elif args.command == "find-contradictions":
+        results = store.find_contradictions(
+            project=args.project, max_llm_checks=args.max_llm_checks)
+        edges = store._persist_contradiction_results(results)
+        if as_json:
+            print(json.dumps({"results": results, "new_edges": edges},
+                             indent=2, default=str))
+        elif not results:
+            print("No contradictions detected.")
+        else:
+            print(f"Found {len(results)} contradicting pair(s) "
+                  f"({edges} new edge(s) recorded):")
+            for i, r in enumerate(results, 1):
+                a, b = r["memory_a"], r["memory_b"]
+                print(f"{i}. ({r['confidence']:.2f}) {a['topic']} ↔ {b['topic']}")
+                print(f"   A: {(a['summary'] or '')[:200]}")
+                print(f"   B: {(b['summary'] or '')[:200]}")
+                if r.get("explanation"):
+                    print(f"   why: {r['explanation']}")
+    elif args.command == "queue":
+        text = args.transcript
+        if args.file:
+            with open(args.file, "r", encoding="utf-8") as fh:
+                text = fh.read()
+        pid = store.queue_extraction(
+            text, session_id=args.session_id, source="cli-queue")
+        _out([f"Queued: {pid}"], {"id": pid})
+    elif args.command == "process-queue":
+        counts = store.process_extraction_queue(
+            limit=args.limit, project=args.project)
+        _out([f"Processed {counts['processed']}, stored {counts['stored']} "
+              f"memories, {counts['failed']} failed"], counts)
     elif args.command == "purge":
         n = store.purge_expired()
         _out([f"Purged {n} expired memories"], {"purged": n})
@@ -1020,9 +1126,12 @@ def main():
         # daily_sweep instantiates its own store, but we already opened the DB;
         # it'll honor NOSHY_DB if set, so just call it.
         result = daily_sweep()
+        q = result.get("queue", {})
         _out([f"Sweep: purged={result['purged']}, "
               f"consolidated={result['consolidated']}, "
-              f"clusters={result.get('clusters', 0)}",
+              f"clusters={result.get('clusters', 0)}, "
+              f"queue_processed={q.get('processed', 0)}, "
+              f"queue_failed={q.get('failed', 0)}",
               f"Store: {result['stats']['memory_count']} memories, "
               f"avg weight {(result['stats']['avg_weight'] or 0):.2f}"],
              result)
