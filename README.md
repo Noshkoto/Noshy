@@ -484,10 +484,10 @@ The schema is compatible — memories, memoirs, concepts, and metadata all trans
 | ICM import | N/A | Built-in |
 | Config | Env vars only | TOML file + env var overrides |
 | Lifecycle | Manual process management | Graceful shutdown, auto-migration, retry |
-|| Cosine similarity | Pure Python | Numpy-vectorized (~50x faster), pure-Python fallback |
-|| Contradiction detection | None | LLM-powered conflict scan with persistent `contradicts` edges |
-|| Extraction queue | Synchronous only | Async queue with background drain |
-|| Logs | stdout only | Rotating file logs (5MB x 3) |
+| Cosine similarity | Pure Python | Numpy-vectorized (~50x faster), pure-Python fallback |
+| Contradiction detection | None | LLM-powered conflict scan with persistent `contradicts` edges |
+| Extraction queue | Synchronous only | Async queue with background drain |
+| Logs | stdout only | Rotating file logs (5MB x 3) |
 | Dashboard auth | None | Token prompt modal, localStorage persistence |
 
 ## Roadmap
