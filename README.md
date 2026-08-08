@@ -417,7 +417,9 @@ http-port = 8720
 | `NOSHY_API_BASE` | `http://127.0.0.1:8642/v1` | LLM API for extraction |
 | `NOSHY_API_KEY` | `API_SERVER_KEY` | LLM API key |
 | `NOSHY_MODEL` | `hermes-agent` | Model for extraction |
-| `NOSHY_HTTP_TOKEN` | _unset_ | If set, all HTTP routes require `Authorization: Bearer *** (except `/health` and `/`) |
+| `NOSHY_HTTP_HOST` | `127.0.0.1` | Bind address for the HTTP server. Overridden by `--host` |
+| `NOSHY_HTTP_PORT` | `8720` | Port for the HTTP server. Overridden by `--port` |
+| `NOSHY_HTTP_TOKEN` | _unset_ | If set, every HTTP route except `/health` and `/` requires an `Authorization: Bearer` header |
 | `NOSHY_LOG_FILE` | _unset_ | If set (or stderr is not a tty), rotating logs go to `~/.noshy/noshy.log` (5MB x 3) |
 
 ### Database migrations
