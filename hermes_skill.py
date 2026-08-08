@@ -112,12 +112,19 @@ def noshy_link(source_query: str, target_query: str, relation: str = "related") 
         relation: Relationship type (related, extends, depends_on, contradicts, caused_by)
     """
     store = get_store()
-    sources = store.recall_hybrid(source_query, limit=1)
-    targets = store.recall_hybrid(target_query, limit=1)
-    
+    # Graph edges have foreign keys into memories(id), so memoir hits are not
+    # valid endpoints. Over-fetch and drop them rather than linking blindly.
+    sources = [r for r in store.recall_hybrid(source_query, limit=5)
+               if r.get("_kind") != "memoir"]
+    targets = [r for r in store.recall_hybrid(target_query, limit=5)
+               if r.get("_kind") != "memoir"]
+
     if not sources or not targets:
-        return "Could not find one or both memories."
-    
+        return "Could not find one or both memories. Links connect memories, not memoirs."
+
+    if sources[0]["id"] == targets[0]["id"]:
+        return "Both queries matched the same memory. Nothing to link."
+
     store.link_memories(sources[0]["id"], targets[0]["id"], relation=relation)
     return f"Linked '{sources[0]['topic']}' --{relation}--> '{targets[0]['topic']}'"
 
