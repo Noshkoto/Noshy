@@ -47,6 +47,7 @@ Noshy gives your AI agent real memory — not note-taking, not context stuffing,
 - **Rotating request logs** — set `NOSHY_LOG_FILE` or run in a container to get `~/.noshy/noshy.log` (5MB x 3 rotation)
 - **Contradiction detection** — scans memory pairs in a similarity band and asks the LLM whether they conflict; persists confirmed pairs as `contradicts` edges so future recalls warn about them
 - **Async extraction queue** — hand off long transcripts without blocking on the LLM; a periodic sweep drains the queue in the background
+- **Hermes skill module**: memory operations as native Hermes Agent tool functions, no MCP round trip required
 
 ## Hermes vs Noshy
 
@@ -234,6 +235,41 @@ Dashboard features:
 When `NOSHY_HTTP_TOKEN` is set, the dashboard shows a token prompt modal on
 first load. The token persists in localStorage across reloads. A "Forget"
 button clears it. API routes enforce auth; `/` and `/health` stay public.
+
+### Hermes Skill
+
+`hermes_skill.py` ships with the package and exposes memory operations as
+native Hermes Agent tool functions, for workflows that call Python directly
+instead of going through MCP. It holds one shared store and reads `NOSHY_DB`
+for the database path.
+
+| Function | What it does |
+|----------|-------------|
+| `noshy_remember` | Store a memory with keywords, importance, and project |
+| `noshy_recall` | Hybrid search returning a numbered result list |
+| `noshy_learn` | Store permanent knowledge as a memoir |
+| `noshy_summary` | Overview for session start: database counts plus the 20 most recent memories that still carry weight |
+| `noshy_link` | Resolve two queries to memories and connect them with a graph edge |
+
+```python
+import hermes_skill as noshy
+
+noshy.noshy_remember("auth-fix", "Staging egress needs a SOCKS5 proxy",
+                     keywords=["proxy"], importance="high", project="api")
+noshy.noshy_link("proxy", "deploy", relation="depends_on")
+print(noshy.noshy_summary(project="api"))
+```
+
+`noshy_link` connects memories only. Memoir matches are filtered out of both
+endpoints, because graph edges carry foreign keys into the memories table.
+Valid relations are `related`, `extends`, `depends_on`, `contradicts`, and
+`caused_by`.
+
+The module also runs as a CLI for quick lookups:
+
+```bash
+python3 hermes_skill.py recall "deploy config" --project api
+```
 
 ### Session Hooks
 
