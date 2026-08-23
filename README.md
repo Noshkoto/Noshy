@@ -561,6 +561,7 @@ The schema is compatible — memories, memoirs, concepts, and metadata all trans
 - [x] Input validation and silent-except cleanup
 - [x] Contradiction detection (`noshy_find_contradictions` + `contradicts` edges on recall)
 - [x] Async extraction queue (`noshy_queue_extraction` / `noshy_process_queue`)
+- [x] Hermes skill module (native tool functions in `hermes_skill.py`, no MCP round trip)
 - [x] 56 tests (was 47)
 - [ ] Per-user database isolation (multi-tenant — one DB per token)
 
