@@ -262,8 +262,9 @@ print(noshy.noshy_summary(project="api"))
 
 `noshy_link` connects memories only. Memoir matches are filtered out of both
 endpoints, because graph edges carry foreign keys into the memories table.
-Valid relations are `related`, `extends`, `depends_on`, `contradicts`, and
-`caused_by`.
+Self-links (both queries resolving to the same memory) are rejected with a
+clear message instead of raising. Valid relations are `related`, `extends`,
+`depends_on`, `contradicts`, and `caused_by`.
 
 The module also runs as a CLI for quick lookups:
 
