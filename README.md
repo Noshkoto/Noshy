@@ -243,13 +243,17 @@ native Hermes Agent tool functions, for workflows that call Python directly
 instead of going through MCP. It holds one shared store and reads `NOSHY_DB`
 for the database path.
 
+The module also ships as a Hermes Agent skill module. Drop it into your
+skills directory and the five functions below become native agent tools,
+with no MCP round trip and no server process to keep alive.
+
 | Function | What it does |
 |----------|-------------|
 | `noshy_remember` | Store a memory with keywords, importance, and project |
 | `noshy_recall` | Hybrid search returning a numbered result list |
 | `noshy_learn` | Store permanent knowledge as a memoir |
 | `noshy_summary` | Overview for session start: database counts plus the 20 most recent memories that still carry weight |
-| `noshy_link` | Resolve two queries to memories and connect them with a graph edge |
+| `noshy_link` | Resolve two queries to memories and connect them with a graph edge. Memoir hits are filtered from both endpoints and self-links are rejected with a message instead of raising `sqlite3.IntegrityError` |
 
 ```python
 import hermes_skill as noshy
@@ -562,6 +566,8 @@ The schema is compatible — memories, memoirs, concepts, and metadata all trans
 - [x] Contradiction detection (`noshy_find_contradictions` + `contradicts` edges on recall)
 - [x] Async extraction queue (`noshy_queue_extraction` / `noshy_process_queue`)
 - [x] Hermes skill module (native tool functions in `hermes_skill.py`, no MCP round trip)
+- [x] Hermes skill module shipped as an installable agent skill
+- [x] noshy_link guards: memoir hits filtered, self-links rejected with a clear message
 - [x] 56 tests (was 47)
 - [ ] Per-user database isolation (multi-tenant — one DB per token)
 
