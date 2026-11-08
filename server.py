@@ -883,7 +883,16 @@ def run_http(host: str = "127.0.0.1", port: int = 8720, db_path: str = None):
             except Exception:
                 log.info("HTTP %s", " ".join(str(a) for a in args))
 
-    server = ThreadingHTTPServer((host, port), Handler)
+    class _Server(ThreadingHTTPServer):
+        # HTTPServer.server_bind() resolves socket.getfqdn() only to fill server_name, which
+        # Noshy never reads. That reverse-DNS lookup can block for many seconds (macOS CI runners
+        # hit it on every bind), so startup skips it.
+        def server_bind(self):
+            import socketserver
+            socketserver.TCPServer.server_bind(self)
+            self.server_name, self.server_port = self.server_address[:2]
+
+    server = _Server((host, port), Handler)
     server.daemon_threads = True
     log.info(f"Noshy HTTP API running on http://{host}:{port}")
 
