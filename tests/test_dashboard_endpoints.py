@@ -23,6 +23,8 @@ def _wait_ready(port, timeout=5.0):
             return
         except (OSError, urllib.error.URLError):
             time.sleep(0.05)
+    import faulthandler, sys
+    faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
     raise TimeoutError(f"server on :{port} not ready")
 
 
