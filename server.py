@@ -890,7 +890,8 @@ def run_http(host: str = "127.0.0.1", port: int = 8720, db_path: str = None):
         def server_bind(self):
             import socketserver
             socketserver.TCPServer.server_bind(self)
-            self.server_name, self.server_port = self.server_address[:2]
+            host_, port_ = self.server_address[:2]
+            self.server_name, self.server_port = str(host_), int(port_)
 
     server = _Server((host, port), Handler)
     server.daemon_threads = True
