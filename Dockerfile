@@ -30,7 +30,7 @@ RUN set -eux; \
 
 # Layer 2: source (changes most often, so it sits on top)
 WORKDIR /app
-COPY store.py embed.py extractor.py context.py hooks.py \
+COPY store.py embed.py extractor.py context.py hooks.py config.py store_factory.py \
      hermes_skill.py decorator.py noshy.py server.py ./
 
 # Non-root user — Noshy stores its DB in a mounted volume so this is safe
